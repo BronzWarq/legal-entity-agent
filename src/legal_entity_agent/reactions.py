@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, Mapping
-
+from typing import Literal
 
 # Набор стандартных реакций Telegram Bot API для обычных (не Premium) ботов.
 STANDARD_TELEGRAM_REACTIONS: tuple[str, ...] = (
@@ -32,7 +32,7 @@ class ReactionSettings:
     custom_emoji_id: str | None = None
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> "ReactionSettings":
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> ReactionSettings:
         env = os.environ if environ is None else environ
         enabled = env.get("REACTIONS_ENABLED", "true").strip().casefold() in {
             "1", "true", "yes", "да",
