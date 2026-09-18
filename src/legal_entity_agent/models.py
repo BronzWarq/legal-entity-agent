@@ -56,6 +56,11 @@ class FnsEntityRecord:
 @dataclass(frozen=True, slots=True)
 class Assessment:
     record: FnsEntityRecord
+    # Необязательный структурированный отчёт расширенной проверки
+    # atomno-mcp-fns-check. Он не заменяет ответ ЕГРЮЛ и не используется для
+    # вывода «недостоверность отсутствует».
+    deep_report: dict[str, Any] | None = None
+    deep_check_error: str | None = None
 
     @property
     def found(self) -> bool:
