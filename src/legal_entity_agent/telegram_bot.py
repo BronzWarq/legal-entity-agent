@@ -8,7 +8,14 @@ import secrets
 from aiogram import Bot, Dispatcher, Router
 from aiogram import F
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReactionTypeEmoji,
+)
+from aiogram.exceptions import TelegramAPIError
 from dotenv import load_dotenv
 
 from .agent import LegalEntityAgent
@@ -27,6 +34,8 @@ access_store: ChatAccessStore | None = None
 learning_store: LearningStore | None = None
 history_store: HistoryStore | None = None
 chat_skill: ChatSkill | None = None
+reactions_enabled = True
+reaction_emoji = "👍"
 
 
 def _allowed(message: Message) -> bool:
@@ -45,6 +54,47 @@ def _is_root(message: Message) -> bool:
     return bool(message.from_user and is_main_admin(message.from_user.username))
 
 
+async def _react_to_message(message: Message, bot: Bot) -> None:
+    """Ставит настроенную реакцию на сообщение доверенного пользователя.
+
+    Неудача с реакцией не должна блокировать обработку команды или диалога:
+    например, в чате может быть запрещено право бота реагировать на сообщения.
+    """
+
+    if (
+        not reactions_enabled
+        or not message.from_user
+        or message.from_user.is_bot
+        or not _allowed(message)
+    ):
+        return
+    try:
+        await bot.set_message_reaction(
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            reaction=[ReactionTypeEmoji(emoji=reaction_emoji)],
+            is_big=False,
+        )
+    except TelegramAPIError:
+        logging.warning(
+            "Не удалось поставить реакцию %s в чате %s на сообщение %s",
+            reaction_emoji,
+            message.chat.id,
+            message.message_id,
+            exc_info=True,
+        )
+
+
+@router.message.outer_middleware()
+async def reaction_middleware(handler, event, data):
+    """Добавляет реакцию до передачи сообщения профильному обработчику."""
+
+    bot = data.get("bot")
+    if isinstance(event, Message) and bot is not None:
+        await _react_to_message(event, bot)
+    return await handler(event, data)
+
+
 def help_text() -> str:
     """Возвращает единый список команд для справки и документации бота."""
 
@@ -61,6 +111,7 @@ def help_text() -> str:
         "/feedback ID ОЦЕНКА — отправить оценку результата проверки.\n"
         "  Оценки: correct, incorrect или needs_review.\n\n"
         "/chat_reset — очистить память разговорного диалога в текущем чате.\n\n"
+        "Реакция бота на сообщения доверенных пользователей настраивается через REACTIONS_ENABLED и REACTION_EMOJI.\n\n"
         "Команды Главного администратора @Sholomon:\n"
         "/grant @username — выдать пользователю доступ в текущем чате.\n"
         "/revoke @username — отозвать доступ пользователя в текущем чате.\n"
@@ -534,6 +585,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 async def _run() -> None:
     global agent, access_store, learning_store, history_store, chat_skill
+    global reactions_enabled, reaction_emoji
     load_dotenv()
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -552,6 +604,8 @@ async def _run() -> None:
         hash_salt=os.getenv("LEARNING_HASH_SALT", ""),
     )
     chat_skill = ChatSkill.from_env()
+    reactions_enabled = _env_bool("REACTIONS_ENABLED", default=True)
+    reaction_emoji = os.getenv("REACTION_EMOJI", "👍").strip() or "👍"
     retention = os.getenv("LEARNING_RETENTION_DAYS", "").strip()
     if retention:
         try:
