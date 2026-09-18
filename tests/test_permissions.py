@@ -1,4 +1,9 @@
-from legal_entity_agent.permissions import AccessPolicy, ChatAccessStore, is_main_admin, parse_tags
+from legal_entity_agent.permissions import (
+    AccessPolicy,
+    ChatAccessStore,
+    is_main_admin,
+    parse_tags,
+)
 
 
 def test_tags_are_case_insensitive_and_support_at_sign() -> None:
