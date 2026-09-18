@@ -1,6 +1,10 @@
 import pytest
 
-from legal_entity_agent.identifiers import InvalidIdentifier, parse_identifier, parse_search_query
+from legal_entity_agent.identifiers import (
+    InvalidIdentifier,
+    parse_identifier,
+    parse_search_query,
+)
 from legal_entity_agent.models import IdentifierKind
 
 
