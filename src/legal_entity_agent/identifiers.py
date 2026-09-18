@@ -58,7 +58,7 @@ def parse_identifier(value: str) -> Identifier:
 
 
 def _labeled_values(value: str, label: str) -> list[str]:
-    pattern = rf"(?i)(?:{label})\s*(?:№|N|номер)?\s*[:\-]?\s*(\d{{9,15}})"
+    pattern = rf"(?i)(?<!\w){label}(?!\w)\s*(?:№|N|номер)?\s*[:\-]?\s*(\d{{9,15}})"
     return re.findall(pattern, value)
 
 
@@ -82,7 +82,11 @@ def parse_search_query(value: str) -> SearchQuery:
         ("КПП", IdentifierKind.KPP),
     )
     for label, kind in labeled_patterns:
-        for digits in _labeled_values(normalized, label):
+        labeled_matches = _labeled_values(normalized, label)
+        explicit_labels = re.findall(rf"(?i)(?<!\w){label}(?!\w)", normalized)
+        if explicit_labels and len(labeled_matches) < len(explicit_labels):
+            raise InvalidIdentifier(f"После реквизита {label} не найдено корректное цифровое значение.")
+        for digits in labeled_matches:
             if kind is IdentifierKind.INN:
                 if len(digits) not in (10, 12) or not _valid_inn(digits):
                     raise InvalidIdentifier(f"Контрольная сумма {kind.value} не прошла проверку.")
