@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import zipfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable
 from xml.etree import ElementTree as ET
 
@@ -197,7 +197,7 @@ def _build_xlsx(data: list[tuple[str, ...]]) -> bytes:
     ET.SubElement(content_types, f"{{{ct_ns}}}Override", {"PartName": "/docProps/core.xml", "ContentType": "application/vnd.openxmlformats-package.core-properties+xml"})
     ET.SubElement(content_types, f"{{{ct_ns}}}Override", {"PartName": "/docProps/app.xml", "ContentType": "application/vnd.openxmlformats-officedocument.extended-properties+xml"})
 
-    now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     core = ET.Element(f"{{{_CORE_PROPS_NS}}}coreProperties")
     ET.SubElement(core, f"{{{_DC_NS}}}creator").text = "legal-entity-agent"
     ET.SubElement(core, f"{{{_DCTERMS_NS}}}created", {f"{{{_XSI_NS}}}type": "dcterms:W3CDTF"}).text = now
