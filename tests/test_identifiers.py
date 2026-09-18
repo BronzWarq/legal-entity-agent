@@ -40,3 +40,9 @@ def test_search_query_accepts_unlabeled_requisites() -> None:
 def test_invalid_identifier(value: str) -> None:
     with pytest.raises(InvalidIdentifier):
         parse_identifier(value)
+
+
+@pytest.mark.parametrize("value", ["ИНН 123", "ОГРН", "КПП abc"])
+def test_labeled_requisite_with_invalid_value_is_not_treated_as_free_text(value: str) -> None:
+    with pytest.raises(InvalidIdentifier):
+        parse_search_query(value)
