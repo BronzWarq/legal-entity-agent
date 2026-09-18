@@ -5,8 +5,10 @@ import logging
 import os
 import secrets
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BufferedInputFile,
@@ -1135,6 +1137,21 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return default if value is None else value.strip().casefold() in {"1", "true", "yes", "да"}
 
 
+def _telegram_proxy() -> str | None:
+    """Возвращает проверенный прокси для Telegram API без вывода секрета в логи."""
+
+    value = os.getenv("TELEGRAM_PROXY", "").strip()
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme.casefold() not in {"http", "https", "socks5", "socks5h"} or not parsed.hostname:
+        raise RuntimeError(
+            "TELEGRAM_PROXY должен быть URL HTTPS/HTTP или SOCKS5-прокси, например "
+            "socks5://user:password@host:1080."
+        )
+    return value
+
+
 async def _run() -> None:
     global agent, access_store, learning_store, history_store, license_store, audit_store, watch_store, chat_skill
     global reaction_settings
@@ -1181,7 +1198,9 @@ async def _run() -> None:
             learning_store.purge_older_than(int(retention))
         except ValueError as exc:
             raise RuntimeError("LEARNING_RETENTION_DAYS должен быть целым числом дней.") from exc
-    bot = Bot(token=token)
+    proxy = _telegram_proxy()
+    session = AiohttpSession(proxy=proxy) if proxy else None
+    bot = Bot(token=token, session=session) if session else Bot(token=token)
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
