@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from .agent import LegalEntityAgent
 from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
+from .deep_check import AtomnoFnsCheckAdapter
 from .excel_export import build_check_workbook, row_from_assessment, row_from_error
 from .fns_client import FnsEgrulClient, FnsError
 from .history import HistoryEntry, HistoryStore
@@ -702,7 +703,13 @@ async def _run() -> None:
         base_url=os.getenv("FNS_BASE_URL", "").strip() or "https://egrul.nalog.ru/",
         timeout=_positive_env_float("FNS_TIMEOUT_SECONDS", 20.0),
     )
-    agent = LegalEntityAgent(client=fns_client)
+    deep_checker = None
+    if _env_bool("MCP_FNS_CHECK_ENABLED"):
+        deep_checker = AtomnoFnsCheckAdapter(
+            include_extended_risks=_env_bool("MCP_FNS_CHECK_EXTENDED_RISKS", True),
+            lawsuits_threshold_rub=_positive_env_float("MCP_FNS_CHECK_LAWSUITS_THRESHOLD_RUB", 1_000_000.0),
+        )
+    agent = LegalEntityAgent(client=fns_client, deep_checker=deep_checker)
     learning_store = LearningStore(
         os.getenv("LEARNING_DB_PATH", "data/learning.sqlite3"),
         store_raw=_env_bool("LEARNING_STORE_RAW_REQUESTS"),
@@ -728,6 +735,8 @@ async def _run() -> None:
         await dispatcher.start_polling(bot)
     finally:
         await bot.session.close()
+        if agent:
+            await agent.close()
         if learning_store:
             learning_store.close()
         if access_store:
