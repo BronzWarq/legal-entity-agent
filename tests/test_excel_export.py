@@ -9,7 +9,12 @@ from legal_entity_agent.excel_export import (
     row_from_assessment,
     row_from_error,
 )
-from legal_entity_agent.models import Assessment, FnsEntityRecord, InaccuracyState, SearchQuery
+from legal_entity_agent.models import (
+    Assessment,
+    FnsEntityRecord,
+    InaccuracyState,
+    SearchQuery,
+)
 
 
 def _texts(workbook: bytes) -> list[str]:
