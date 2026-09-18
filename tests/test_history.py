@@ -1,7 +1,14 @@
 from datetime import datetime
 
 from legal_entity_agent.history import HistoryStore
-from legal_entity_agent.models import Assessment, FnsEntityRecord, Identifier, IdentifierKind, InaccuracyState, SearchQuery
+from legal_entity_agent.models import (
+    Assessment,
+    FnsEntityRecord,
+    Identifier,
+    IdentifierKind,
+    InaccuracyState,
+    SearchQuery,
+)
 
 
 def _assessment() -> Assessment:
