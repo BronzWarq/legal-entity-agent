@@ -15,7 +15,27 @@ _ABSENT_PHRASES = (
     "признак недостоверности отсутствует",
     "признак недостоверности сведений отсутствует",
     "сведения о недостоверности отсутствуют",
+    "отсутствуют недостоверные сведения",
+    "недостоверных сведений не выявлено",
+    "признаки недостоверности не выявлены",
+    "нет недостоверных сведений",
 )
+_PRESENT_PHRASES = (
+    "внесена запись о недостоверности",
+    "есть сведения о недостоверности",
+    "выявлены недостоверные сведения",
+    "признак недостоверности установлен",
+    "сведения недостоверны",
+)
+_INACCURACY_KEYS = {
+    "inaccuracy",
+    "isinaccurate",
+    "hasinaccuracy",
+    "invalidinformation",
+    "hasinvalidinformation",
+    "недостоверность",
+    "признакнедостоверности",
+}
 
 
 def _walk(value: Any) -> Iterable[tuple[str | None, Any]]:
@@ -33,7 +53,7 @@ def _first(payload: Any, names: tuple[str, ...]) -> Any:
     wanted = {name.casefold() for name in names}
     for key, value in _walk(payload):
         if key and key.casefold() in wanted and isinstance(value, (str, int, float)):
-            return value
+            return str(value)
     return None
 
 
@@ -54,11 +74,31 @@ def _markers(payload: Any) -> tuple[str, ...]:
 
 
 def _inaccuracy_state(payload: Any, markers: tuple[str, ...]) -> InaccuracyState:
-    if any(any(phrase in value.casefold() for phrase in _ABSENT_PHRASES) for value in markers):
-        return InaccuracyState.ABSENT
-    if markers:
-        return InaccuracyState.PRESENT
-    return InaccuracyState.NOT_REPORTED
+    structured_state: InaccuracyState | None = None
+    for key, value in _walk(payload):
+        if key and key.casefold().replace("_", "") in _INACCURACY_KEYS and isinstance(value, bool):
+            state = InaccuracyState.PRESENT if value else InaccuracyState.ABSENT
+            if structured_state is not None and structured_state is not state:
+                return InaccuracyState.NOT_REPORTED
+            structured_state = state
+    lowered_markers = tuple(value.casefold() for value in markers)
+    has_present_text = any(
+        any(phrase in value for phrase in _PRESENT_PHRASES) for value in lowered_markers
+    )
+    has_absent_text = any(
+        any(phrase in value for phrase in _ABSENT_PHRASES) for value in lowered_markers
+    )
+    if has_present_text and has_absent_text:
+        return InaccuracyState.NOT_REPORTED
+    if has_present_text:
+        text_state = InaccuracyState.PRESENT
+    elif has_absent_text:
+        text_state = InaccuracyState.ABSENT
+    else:
+        text_state = None
+    if structured_state is not None and text_state is not None and structured_state is not text_state:
+        return InaccuracyState.NOT_REPORTED
+    return text_state or structured_state or InaccuracyState.NOT_REPORTED
 
 
 def _as_date(value: Any) -> date | None:
