@@ -8,6 +8,7 @@ from .history import HistoryEntry, HistoryStore
 from .learning import FeedbackLabel, LearningEvent, LearningStore
 from .models import Assessment, FnsEntityRecord, Identifier, IdentifierKind, InaccuracyState, SearchQuery
 from .permissions import ChatAccessStore, TrustedUser, is_main_admin
+from .reactions import ReactionSettings, STANDARD_TELEGRAM_REACTIONS
 
 __all__ = [
     "Assessment",
@@ -34,4 +35,6 @@ __all__ = [
     "ChatSkillNotConfigured",
     "TrustedUser",
     "is_main_admin",
+    "ReactionSettings",
+    "STANDARD_TELEGRAM_REACTIONS",
 ]
