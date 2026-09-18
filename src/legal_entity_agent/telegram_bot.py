@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from dotenv import load_dotenv
 
 from .agent import LegalEntityAgent
+from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
 from .fns_client import FnsError
 from .history import HistoryEntry, HistoryStore
@@ -25,6 +26,7 @@ agent: LegalEntityAgent | None = None
 access_store: ChatAccessStore | None = None
 learning_store: LearningStore | None = None
 history_store: HistoryStore | None = None
+chat_skill: ChatSkill | None = None
 
 
 def _allowed(message: Message) -> bool:
@@ -58,6 +60,7 @@ def help_text() -> str:
         "/check_all (или /check all) — повторно проверить все уникальные юрлица из базы истории (администратор).\n"
         "/feedback ID ОЦЕНКА — отправить оценку результата проверки.\n"
         "  Оценки: correct, incorrect или needs_review.\n\n"
+        "/chat_reset — очистить память разговорного диалога в текущем чате.\n\n"
         "Команды Главного администратора @Sholomon:\n"
         "/grant @username — выдать пользователю доступ в текущем чате.\n"
         "/revoke @username — отозвать доступ пользователя в текущем чате.\n"
@@ -81,6 +84,18 @@ async def start(message: Message) -> None:
 @router.message(Command("help"))
 async def help_command(message: Message) -> None:
     await message.answer(help_text())
+
+
+@router.message(Command("chat_reset"))
+async def chat_reset(message: Message) -> None:
+    if not _allowed(message) or not message.from_user:
+        await message.answer("У вас нет разрешения на разговорный режим.")
+        return
+    if chat_skill is None:
+        await message.answer("Разговорный режим не настроен.")
+        return
+    chat_skill.clear(f"{message.chat.id}:{message.from_user.id}")
+    await message.answer("Память разговорного диалога очищена.")
 
 
 def _feedback_keyboard(event_id: str) -> InlineKeyboardMarkup:
@@ -491,11 +506,25 @@ async def natural_language(message: Message) -> None:
     elif request.intent is NaturalIntent.HISTORY:
         await _show_history(message)
     else:
-        await message.answer(
-            "Я понимаю запросы на проверку юридических лиц. "
-            "Напишите: «Налог, проверь компанию с ИНН 7707083893» "
-            "или используйте /help."
-        )
+        if not _allowed(message) or not message.from_user:
+            await message.answer("У вас нет разрешения на разговорный режим.")
+            return
+        if chat_skill is None:
+            await message.answer(
+                "Разговорный режим пока не настроен. "
+                "Проверки доступны через /check или фразу «Налог, проверь компанию с ИНН …»."
+            )
+            return
+        try:
+            answer = await chat_skill.reply(
+                f"{message.chat.id}:{message.from_user.id}",
+                message.text,
+            )
+        except ChatSkillError:
+            logging.exception("Ошибка разговорного skill")
+            await message.answer("Не удалось получить ответ разговорного модуля. Попробуйте ещё раз.")
+        else:
+            await message.answer(answer)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -504,7 +533,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 async def _run() -> None:
-    global agent, access_store, learning_store, history_store
+    global agent, access_store, learning_store, history_store, chat_skill
     load_dotenv()
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -522,6 +551,7 @@ async def _run() -> None:
         os.getenv("HISTORY_DB_PATH", "data/history.sqlite3"),
         hash_salt=os.getenv("LEARNING_HASH_SALT", ""),
     )
+    chat_skill = ChatSkill.from_env()
     retention = os.getenv("LEARNING_RETENTION_DAYS", "").strip()
     if retention:
         try:

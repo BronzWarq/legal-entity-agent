@@ -1,6 +1,7 @@
 """Проверка сведений о юридических лицах по сервисам ФНС."""
 
 from .agent import LegalEntityAgent
+from .chat_skill import ChatSkill, ChatSkillConfig, ChatSkillError, ChatSkillNotConfigured
 from .conversation import NaturalIntent, NaturalRequest, parse_natural_request
 from .identifiers import InvalidIdentifier, parse_search_query
 from .history import HistoryEntry, HistoryStore
@@ -27,6 +28,10 @@ __all__ = [
     "parse_search_query",
     "parse_natural_request",
     "ChatAccessStore",
+    "ChatSkill",
+    "ChatSkillConfig",
+    "ChatSkillError",
+    "ChatSkillNotConfigured",
     "TrustedUser",
     "is_main_admin",
 ]
