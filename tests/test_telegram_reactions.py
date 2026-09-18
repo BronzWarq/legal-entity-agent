@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from legal_entity_agent import telegram_bot
-from legal_entity_agent.reactions import ReactionSettings, STANDARD_TELEGRAM_REACTIONS
+from legal_entity_agent.reactions import STANDARD_TELEGRAM_REACTIONS, ReactionSettings
 
 
 class FakeBot:
