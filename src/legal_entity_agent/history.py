@@ -8,7 +8,7 @@ import json
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .models import Assessment, Identifier, SearchQuery
@@ -105,7 +105,7 @@ class HistoryStore:
     ) -> None:
         normalized = _query(query)
         record = assessment.record
-        created_at = datetime.now(timezone.utc)
+        created_at = datetime.now(UTC)
         with self._lock, self._connection:
             self._connection.execute(
                 """
@@ -221,7 +221,7 @@ class HistoryStore:
         return HistoryEntry(
             event_id=row["event_id"],
             chat_id=row["chat_id"],
-            created_at=datetime.fromisoformat(row["created_at"]).astimezone(timezone.utc),
+            created_at=datetime.fromisoformat(row["created_at"]).astimezone(UTC),
             query_text=row["query_text"],
             query_kind=row["query_kind"],
             name=row["name"],
