@@ -26,6 +26,10 @@ def test_natural_commands_and_trigger_are_case_insensitive() -> None:
     assert parse_natural_request("Налог, привет").intent is NaturalIntent.GREETING
 
 
+def test_natural_skills_request_is_help() -> None:
+    assert parse_natural_request("Налог, расскажи о своих навыках").intent is NaturalIntent.HELP
+
+
 def test_unaddressed_messages_are_ignored() -> None:
     assert parse_natural_request("Проверь компанию с ИНН 7707083893") is None
     assert parse_natural_request("налоговый консультант") is None
