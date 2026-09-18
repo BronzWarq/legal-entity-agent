@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram import F
@@ -52,6 +53,7 @@ def help_text() -> str:
         "  Можно указать ИНН, ОГРН, КПП, название, адрес или несколько реквизитов.\n"
         "/history — показать ранее выполненные проверки в текущем чате.\n"
         "/history ID — показать сохранённый итог конкретной проверки.\n"
+        "/check_all (или /check all) — повторно проверить все уникальные юрлица из базы истории (администратор).\n"
         "/feedback ID ОЦЕНКА — отправить оценку результата проверки.\n"
         "  Оценки: correct, incorrect или needs_review.\n\n"
         "Команды Главного администратора @Sholomon:\n"
@@ -92,6 +94,9 @@ def _feedback_keyboard(event_id: str) -> InlineKeyboardMarkup:
 
 @router.message(Command("check"))
 async def check(message: Message, command: CommandObject) -> None:
+    if command.args and command.args.strip().casefold() == "all":
+        await check_all(message)
+        return
     if not _allowed(message):
         await message.answer("У вас нет разрешения на выполнение этой команды.")
         return
@@ -222,6 +227,121 @@ async def history(message: Message, command: CommandObject) -> None:
         return
     header = "История проверок текущего чата:\n" if _is_root(message) else "Ваши проверки в текущем чате:\n"
     await message.answer(header + "\n".join(_history_line(entry) for entry in entries))
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        logging.warning("%s должен быть целым числом; используется значение %s.", name, default)
+        return default
+    return parsed if parsed > 0 else default
+
+
+async def _answer_chunks(message: Message, lines: list[str], *, limit: int = 3900) -> None:
+    """Отправляет длинный итог несколькими сообщениями в пределах лимита Telegram."""
+
+    chunk: list[str] = []
+    length = 0
+    for line in lines:
+        addition = len(line) + (1 if chunk else 0)
+        if chunk and length + addition > limit:
+            await message.answer("\n".join(chunk))
+            chunk = []
+            length = 0
+        chunk.append(line)
+        length += len(line) + (1 if length else 0)
+    if chunk:
+        await message.answer("\n".join(chunk))
+
+
+def _bulk_result_line(query: str, event_id: str, result) -> str:
+    record = result.record
+    title = record.name or query
+    identifiers = " / ".join(value for value in (record.inn, record.kpp, record.ogrn) if value)
+    state = {
+        "present": "есть отметка о недостоверности",
+        "absent": "отметка о недостоверности отсутствует",
+        "not_reported": "отметка о недостоверности не распознана",
+    }.get(record.inaccuracy_state.value, record.inaccuracy_state.value)
+    details = f" ({identifiers})" if identifiers else ""
+    return f"✅ {title}{details} — {state}; ID проверки: {event_id}"
+
+
+@router.message(Command("check_all", "checkall"))
+async def check_all(message: Message) -> None:
+    """Повторно проверяет все уникальные организации, сохранённые в истории."""
+
+    if not _is_root(message):
+        await message.answer("Команда доступна Главному администратору @Sholomon.")
+        return
+    if not message.from_user or agent is None or history_store is None:
+        await message.answer("Массовая проверка сейчас недоступна: хранилище не настроено.")
+        return
+
+    queries = history_store.list_unique_queries()
+    if not queries:
+        await message.answer("В базе истории нет сохранённых юридических лиц для проверки.")
+        return
+
+    concurrency = _positive_env_int("CHECK_ALL_CONCURRENCY", 3)
+    await message.answer(
+        f"Запускаю повторную проверку {len(queries)} уникальных юридических лиц. "
+        f"Одновременно выполняется до {concurrency} запросов."
+    )
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def process(query):
+        async with semaphore:
+            try:
+                result = await agent.check(query)
+            except FnsError as exc:
+                if learning_store:
+                    learning_store.record_failure(
+                        actor_id=str(message.from_user.id), identifier=query, error=str(exc)
+                    )
+                return False, f"❌ {query.value} — {exc}"
+            except Exception as exc:  # pragma: no cover - защитный контур для массовой операции
+                logging.exception("Ошибка массовой проверки запроса %s", query.value)
+                if learning_store:
+                    learning_store.record_failure(
+                        actor_id=str(message.from_user.id), identifier=query, error="internal error"
+                    )
+                return False, f"❌ {query.value} — внутренняя ошибка проверки"
+
+            report = format_assessment(result)
+            event_id = (
+                learning_store.record_check(
+                    actor_id=str(message.from_user.id),
+                    identifier=query,
+                    assessment=result,
+                    rendered_response=report,
+                )
+                if learning_store
+                else secrets.token_urlsafe(9)
+            )
+            history_store.record_check(
+                event_id=event_id,
+                chat_id=message.chat.id,
+                actor_id=message.from_user.id,
+                query=query,
+                assessment=result,
+                report=report,
+            )
+            return True, _bulk_result_line(query.value, event_id, result)
+
+    outcomes = await asyncio.gather(*(process(query) for query in queries))
+    succeeded = sum(1 for success, _ in outcomes if success)
+    failed = len(outcomes) - succeeded
+    lines = [
+        f"Массовая проверка завершена: успешно — {succeeded}, с ошибкой — {failed}.",
+        "Результаты сохранены в историю текущего чата:",
+    ]
+    lines.extend(line for _, line in outcomes)
+    await _answer_chunks(message, lines)
 
 
 @router.message(Command("learning_queue"))

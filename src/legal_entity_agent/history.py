@@ -157,6 +157,43 @@ class HistoryStore:
             rows = self._connection.execute(sql, params).fetchall()
         return [self._row_to_entry(row) for row in rows]
 
+    def list_unique_queries(self) -> list[SearchQuery]:
+        """Возвращает уникальные юридические лица из всей истории.
+
+        Приоритетом для объединения записей служат ИНН и ОГРН из уже
+        полученного ответа ФНС. КПП без ИНН/ОГРН не считается уникальным
+        идентификатором, поэтому в этом случае используется исходный текст
+        запроса. Более свежая запись сохраняется первой.
+        """
+
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT query_text, inn, ogrn, kpp
+                FROM check_history
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+
+        queries: list[SearchQuery] = []
+        seen: set[str] = set()
+        for row in rows:
+            identities = [
+                identity
+                for identity in (
+                    f"inn:{row['inn']}" if row["inn"] else None,
+                    f"ogrn:{row['ogrn']}" if row["ogrn"] else None,
+                )
+                if identity is not None
+            ]
+            if not identities:
+                identities = [f"query:{' '.join(row['query_text'].split()).casefold()}"]
+            if any(identity in seen for identity in identities):
+                continue
+            seen.update(identities)
+            queries.append(SearchQuery(row["query_text"]))
+        return queries
+
     def get_for(
         self,
         *,

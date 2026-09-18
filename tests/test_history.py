@@ -53,3 +53,46 @@ def test_history_is_scoped_to_chat_and_user(tmp_path) -> None:
     assert store.get_for(event_id="two", chat_id=10, actor_id=100, is_root=False) is None
     assert store.get_for(event_id="two", chat_id=10, actor_id=999, is_root=True).report == "Итог проверки 2"
     store.close()
+
+
+def test_list_unique_queries_deduplicates_by_inn_and_keeps_free_text(tmp_path) -> None:
+    store = HistoryStore(tmp_path / "history.sqlite3", hash_salt="salt")
+    assessment = _assessment()
+    store.record_check(
+        event_id="by-inn",
+        chat_id=10,
+        actor_id=100,
+        query=SearchQuery("ИНН 7707083893"),
+        assessment=assessment,
+        report="По ИНН",
+    )
+    store.record_check(
+        event_id="by-name",
+        chat_id=20,
+        actor_id=200,
+        query=SearchQuery("ООО Ромашка, Москва"),
+        assessment=assessment,
+        report="По названию",
+    )
+    store.record_check(
+        event_id="free-text",
+        chat_id=30,
+        actor_id=300,
+        query=SearchQuery("новая компания без реквизитов"),
+        assessment=Assessment(
+            FnsEntityRecord(
+                query=SearchQuery("новая компания без реквизитов"),
+                source_url="https://egrul.nalog.ru/search-result/free",
+                fetched_at=datetime.now().astimezone(),
+            )
+        ),
+        report="Свободный поиск",
+    )
+
+    queries = store.list_unique_queries()
+
+    assert {query.value for query in queries} == {
+        "ООО Ромашка, Москва",
+        "новая компания без реквизитов",
+    }
+    store.close()
