@@ -13,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    ReactionTypeCustomEmoji,
     ReactionTypeEmoji,
 )
 from aiogram.exceptions import TelegramAPIError
@@ -26,6 +27,7 @@ from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
 from .permissions import ChatAccessStore, is_main_admin, normalize_tag
+from .reactions import ReactionSettings
 from .render import format_assessment
 
 router = Router()
@@ -34,8 +36,7 @@ access_store: ChatAccessStore | None = None
 learning_store: LearningStore | None = None
 history_store: HistoryStore | None = None
 chat_skill: ChatSkill | None = None
-reactions_enabled = True
-reaction_emoji = "👍"
+reaction_settings = ReactionSettings()
 
 
 def _allowed(message: Message) -> bool:
@@ -62,23 +63,29 @@ async def _react_to_message(message: Message, bot: Bot) -> None:
     """
 
     if (
-        not reactions_enabled
+        not reaction_settings.enabled
         or not message.from_user
         or message.from_user.is_bot
         or not _allowed(message)
     ):
         return
+    reaction_label = reaction_settings.custom_emoji_id or reaction_settings.choose_emoji()
     try:
+        reaction = (
+            ReactionTypeCustomEmoji(custom_emoji_id=reaction_settings.custom_emoji_id)
+            if reaction_settings.custom_emoji_id
+            else ReactionTypeEmoji(emoji=reaction_label)
+        )
         await bot.set_message_reaction(
             chat_id=message.chat.id,
             message_id=message.message_id,
-            reaction=[ReactionTypeEmoji(emoji=reaction_emoji)],
+            reaction=[reaction],
             is_big=False,
         )
     except TelegramAPIError:
         logging.warning(
             "Не удалось поставить реакцию %s в чате %s на сообщение %s",
-            reaction_emoji,
+            reaction_label,
             message.chat.id,
             message.message_id,
             exc_info=True,
@@ -111,7 +118,7 @@ def help_text() -> str:
         "/feedback ID ОЦЕНКА — отправить оценку результата проверки.\n"
         "  Оценки: correct, incorrect или needs_review.\n\n"
         "/chat_reset — очистить память разговорного диалога в текущем чате.\n\n"
-        "Реакция бота на сообщения доверенных пользователей настраивается через REACTIONS_ENABLED и REACTION_EMOJI.\n\n"
+        "Реакции бота на сообщения доверенных пользователей настраиваются через REACTIONS_ENABLED, REACTION_EMOJIS и REACTION_MODE.\n\n"
         "Команды Главного администратора @Sholomon:\n"
         "/grant @username — выдать пользователю доступ в текущем чате.\n"
         "/revoke @username — отозвать доступ пользователя в текущем чате.\n"
@@ -585,7 +592,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 async def _run() -> None:
     global agent, access_store, learning_store, history_store, chat_skill
-    global reactions_enabled, reaction_emoji
+    global reaction_settings
     load_dotenv()
     token = os.getenv("BOT_TOKEN")
     if not token:
@@ -604,8 +611,7 @@ async def _run() -> None:
         hash_salt=os.getenv("LEARNING_HASH_SALT", ""),
     )
     chat_skill = ChatSkill.from_env()
-    reactions_enabled = _env_bool("REACTIONS_ENABLED", default=True)
-    reaction_emoji = os.getenv("REACTION_EMOJI", "👍").strip() or "👍"
+    reaction_settings = ReactionSettings.from_env()
     retention = os.getenv("LEARNING_RETENTION_DAYS", "").strip()
     if retention:
         try:
