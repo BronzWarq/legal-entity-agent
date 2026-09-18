@@ -74,7 +74,8 @@ class ChatSkill:
             ChatSkillConfig(
                 api_key=api_key,
                 model=model,
-                base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+                base_url=os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
+                or "https://api.openai.com/v1",
                 timeout=timeout,
                 max_turns=max_turns,
             )
@@ -86,6 +87,7 @@ class ChatSkill:
 
     def clear(self, session_id: str) -> None:
         self._history.pop(session_id, None)
+        self._locks.pop(session_id, None)
 
     async def reply(self, session_id: str, user_text: str) -> str:
         if not self.configured:
@@ -113,8 +115,9 @@ class ChatSkill:
                 "Authorization": f"Bearer {self.config.api_key}",
                 "Content-Type": "application/json",
             }
+            base_url = self.config.base_url.strip().rstrip("/") or "https://api.openai.com/v1"
             async with httpx.AsyncClient(
-                base_url=self.config.base_url + "/",
+                base_url=base_url + "/",
                 headers=headers,
                 timeout=self.config.timeout,
                 transport=self.transport,
