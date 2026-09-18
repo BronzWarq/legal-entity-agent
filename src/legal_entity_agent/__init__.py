@@ -3,6 +3,12 @@
 from .agent import LegalEntityAgent
 from .chat_skill import ChatSkill, ChatSkillConfig, ChatSkillError, ChatSkillNotConfigured
 from .conversation import NaturalIntent, NaturalRequest, parse_natural_request
+from .deep_check import (
+    AtomnoFnsCheckAdapter,
+    DeepCheckError,
+    DeepCheckResult,
+    DeepCheckUnavailable,
+)
 from .excel_export import ExcelCheckRow, build_check_workbook
 from .identifiers import InvalidIdentifier, parse_search_query
 from .history import HistoryEntry, HistoryStore
@@ -28,6 +34,10 @@ __all__ = [
     "NaturalRequest",
     "ExcelCheckRow",
     "build_check_workbook",
+    "AtomnoFnsCheckAdapter",
+    "DeepCheckError",
+    "DeepCheckResult",
+    "DeepCheckUnavailable",
     "SearchQuery",
     "parse_search_query",
     "parse_natural_request",
