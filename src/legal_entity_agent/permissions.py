@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from pathlib import Path
-from datetime import datetime, timezone
 from dataclasses import dataclass
-
+from datetime import UTC, datetime
+from pathlib import Path
 
 MAIN_ADMIN_TAG = "sholomon"
 
@@ -48,6 +47,7 @@ class TrustedUser:
     user_id: str | None
     status: str
     updated_at: str
+    role: str = "checker"
 
 
 class ChatAccessStore:
@@ -83,10 +83,13 @@ class ChatAccessStore:
                 )
                 """
             )
+            columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(chat_access)")}
+            if "role" not in columns:
+                self._connection.execute("ALTER TABLE chat_access ADD COLUMN role TEXT NOT NULL DEFAULT 'checker'")
 
     @staticmethod
     def _now() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return datetime.now(UTC).isoformat()
 
     def close(self) -> None:
         with self._lock:
@@ -120,6 +123,19 @@ class ChatAccessStore:
             return row["status"] == "granted"
         return bool(tag and tag in self.bootstrap_tags)
 
+    def role_for(self, chat_id: int | str, *, user_id: int | str | None, username: str | None) -> str | None:
+        if is_main_admin(username):
+            return "owner"
+        tag = normalize_tag(username or "") if username else ""
+        user_key = str(user_id) if user_id is not None else None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT role FROM chat_access WHERE chat_id=? AND status='granted' "
+                "AND (tag=? OR (user_id IS NOT NULL AND user_id=?)) ORDER BY updated_at DESC LIMIT 1",
+                (str(chat_id), tag, user_key),
+            ).fetchone()
+        return row["role"] if row else ("checker" if tag in self.bootstrap_tags else None)
+
     def grant(
         self,
         chat_id: int | str,
@@ -127,23 +143,27 @@ class ChatAccessStore:
         username: str,
         user_id: int | str | None,
         granted_by: int | str,
+        role: str = "checker",
     ) -> bool:
         tag = normalize_tag(username)
         if not tag or tag == MAIN_ADMIN_TAG:
+            return False
+        if role not in {"viewer", "checker", "reviewer", "manager"}:
             return False
         now = self._now()
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO chat_access (chat_id, tag, user_id, status, updated_at, updated_by)
-                VALUES (?, ?, ?, 'granted', ?, ?)
+                INSERT INTO chat_access (chat_id, tag, user_id, status, updated_at, updated_by, role)
+                VALUES (?, ?, ?, 'granted', ?, ?, ?)
                 ON CONFLICT(chat_id, tag) DO UPDATE SET
                     user_id = excluded.user_id,
                     status = 'granted',
                     updated_at = excluded.updated_at,
-                    updated_by = excluded.updated_by
+                    updated_by = excluded.updated_by,
+                    role = excluded.role
                 """,
-                (str(chat_id), tag, str(user_id) if user_id is not None else None, now, str(granted_by)),
+                (str(chat_id), tag, str(user_id) if user_id is not None else None, now, str(granted_by), role),
             )
         return True
 
@@ -188,7 +208,7 @@ class ChatAccessStore:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT tag, user_id, status, updated_at
+                SELECT tag, user_id, status, updated_at, role
                 FROM chat_access
                 WHERE chat_id = ? AND status = 'granted'
                 ORDER BY tag
@@ -201,6 +221,7 @@ class ChatAccessStore:
                 user_id=row["user_id"],
                 status=row["status"],
                 updated_at=row["updated_at"],
+                role=row["role"] or "checker",
             )
             for row in rows
         ]
