@@ -14,7 +14,7 @@ import secrets
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -47,15 +47,15 @@ class LearningEvent:
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat()
+    return value.astimezone(UTC).isoformat()
 
 
 def _parse_timestamp(value: str) -> datetime:
-    return datetime.fromisoformat(value).astimezone(timezone.utc)
+    return datetime.fromisoformat(value).astimezone(UTC)
 
 
 def _digest(value: str, salt: str) -> str:
