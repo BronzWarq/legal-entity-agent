@@ -54,7 +54,7 @@ class ChatSkill:
         self._locks: dict[str, asyncio.Lock] = {}
 
     @classmethod
-    def from_env(cls) -> "ChatSkill | None":
+    def from_env(cls) -> ChatSkill | None:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
             return None
