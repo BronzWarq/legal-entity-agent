@@ -1,7 +1,11 @@
 import httpx
 import pytest
 
-from legal_entity_agent.fns_client import FnsBlockedError, FnsEgrulClient, FnsNotFoundError
+from legal_entity_agent.fns_client import (
+    FnsBlockedError,
+    FnsEgrulClient,
+    FnsNotFoundError,
+)
 
 
 def _client(handler):
