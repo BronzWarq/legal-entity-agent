@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from legal_entity_agent import telegram_bot
+from legal_entity_agent.reactions import ReactionSettings, STANDARD_TELEGRAM_REACTIONS
 
 
 class FakeBot:
@@ -25,8 +26,7 @@ def _message(*, is_bot: bool = False):
 @pytest.mark.asyncio
 async def test_reaction_is_added_for_allowed_user(monkeypatch) -> None:
     bot = FakeBot()
-    monkeypatch.setattr(telegram_bot, "reactions_enabled", True)
-    monkeypatch.setattr(telegram_bot, "reaction_emoji", "✅")
+    monkeypatch.setattr(telegram_bot, "reaction_settings", ReactionSettings(emojis=("🔥",)))
     monkeypatch.setattr(telegram_bot, "_allowed", lambda message: True)
 
     await telegram_bot._react_to_message(_message(), bot)
@@ -36,7 +36,7 @@ async def test_reaction_is_added_for_allowed_user(monkeypatch) -> None:
             "chat_id": -100,
             "message_id": 42,
             "reaction": [
-                telegram_bot.ReactionTypeEmoji(emoji="✅"),
+                telegram_bot.ReactionTypeEmoji(emoji="🔥"),
             ],
             "is_big": False,
         }
@@ -46,7 +46,7 @@ async def test_reaction_is_added_for_allowed_user(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_reaction_is_skipped_for_bot_message(monkeypatch) -> None:
     bot = FakeBot()
-    monkeypatch.setattr(telegram_bot, "reactions_enabled", True)
+    monkeypatch.setattr(telegram_bot, "reaction_settings", ReactionSettings())
     monkeypatch.setattr(telegram_bot, "_allowed", lambda message: True)
 
     await telegram_bot._react_to_message(_message(is_bot=True), bot)
@@ -57,9 +57,37 @@ async def test_reaction_is_skipped_for_bot_message(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_reaction_is_skipped_when_disabled(monkeypatch) -> None:
     bot = FakeBot()
-    monkeypatch.setattr(telegram_bot, "reactions_enabled", False)
+    monkeypatch.setattr(telegram_bot, "reaction_settings", ReactionSettings(enabled=False))
     monkeypatch.setattr(telegram_bot, "_allowed", lambda message: True)
 
     await telegram_bot._react_to_message(_message(), bot)
 
     assert bot.calls == []
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_reaction_is_sent_as_custom_type(monkeypatch) -> None:
+    bot = FakeBot()
+    monkeypatch.setattr(
+        telegram_bot,
+        "reaction_settings",
+        ReactionSettings(custom_emoji_id="123456789"),
+    )
+    monkeypatch.setattr(telegram_bot, "_allowed", lambda message: True)
+
+    await telegram_bot._react_to_message(_message(), bot)
+
+    assert bot.calls[0]["reaction"][0].custom_emoji_id == "123456789"
+
+
+def test_all_reaction_settings_include_full_standard_set() -> None:
+    settings = ReactionSettings.from_env({"REACTION_EMOJIS": "all", "REACTION_MODE": "random"})
+
+    assert settings.emojis == STANDARD_TELEGRAM_REACTIONS
+    assert settings.mode == "random"
+
+
+def test_custom_emoji_reaction_settings_are_supported() -> None:
+    settings = ReactionSettings.from_env({"REACTION_CUSTOM_EMOJI_ID": "123456789"})
+
+    assert settings.custom_emoji_id == "123456789"
