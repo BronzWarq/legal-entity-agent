@@ -3,6 +3,7 @@
 from .agent import LegalEntityAgent
 from .chat_skill import ChatSkill, ChatSkillConfig, ChatSkillError, ChatSkillNotConfigured
 from .conversation import NaturalIntent, NaturalRequest, parse_natural_request
+from .excel_export import ExcelCheckRow, build_check_workbook
 from .identifiers import InvalidIdentifier, parse_search_query
 from .history import HistoryEntry, HistoryStore
 from .learning import FeedbackLabel, LearningEvent, LearningStore
@@ -25,6 +26,8 @@ __all__ = [
     "LegalEntityAgent",
     "NaturalIntent",
     "NaturalRequest",
+    "ExcelCheckRow",
+    "build_check_workbook",
     "SearchQuery",
     "parse_search_query",
     "parse_natural_request",
