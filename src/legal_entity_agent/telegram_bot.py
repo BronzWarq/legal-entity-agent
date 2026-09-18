@@ -4,23 +4,26 @@ import asyncio
 import logging
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from aiogram import Bot, Dispatcher, Router
-from aiogram import F
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    MenuButtonWebApp,
     Message,
     ReactionTypeCustomEmoji,
     ReactionTypeEmoji,
+    WebAppInfo,
 )
 from dotenv import load_dotenv
 
 from .agent import LegalEntityAgent
+from .audit import AuditStore
+from .bulk_import import parse_upload
 from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
 from .deep_check import AtomnoFnsCheckAdapter
@@ -29,21 +32,49 @@ from .fns_client import FnsEgrulClient, FnsError
 from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
+from .licenses import LicenseStore, new_license
 from .permissions import ChatAccessStore, is_main_admin, normalize_tag
 from .reactions import ReactionSettings
 from .render import format_assessment
+from .watchlist import WatchStore
 
 router = Router()
 agent: LegalEntityAgent | None = None
 access_store: ChatAccessStore | None = None
 learning_store: LearningStore | None = None
 history_store: HistoryStore | None = None
+license_store: LicenseStore | None = None
+audit_store: AuditStore | None = None
+watch_store: WatchStore | None = None
 chat_skill: ChatSkill | None = None
 reaction_settings = ReactionSettings()
 
 
+def _audit(message: Message, action: str, details: str = "") -> None:
+    if audit_store and message.from_user:
+        try:
+            audit_store.record(chat_id=message.chat.id, actor_id=message.from_user.id,
+                               action=action, details=details)
+        except Exception:
+            logging.exception("Не удалось записать действие в аудит")
+
+
+def _mini_app_url() -> str:
+    """Возвращает безопасный адрес Mini App, опубликованный по HTTPS."""
+    url = os.getenv("MINI_APP_URL", "").strip()
+    return url if url.startswith("https://") else ""
+
+
 def _allowed(message: Message) -> bool:
     return bool(message.from_user and _allowed_user(message.chat.id, message.from_user))
+
+
+def _can_check(message: Message) -> bool:
+    if not message.from_user or not access_store:
+        return False
+    role = access_store.role_for(message.chat.id, user_id=message.from_user.id,
+                                username=message.from_user.username)
+    return role in {"owner", "manager", "reviewer", "checker"}
 
 
 def _allowed_user(chat_id: int, user) -> bool:
@@ -115,29 +146,70 @@ def help_text() -> str:
         "Команды бота:\n\n"
         "/start — запустить бота и получить краткую инструкцию.\n"
         "/help — показать этот список команд.\n"
+        "/skills — рассказать, что умеет агент.\n"
         "/check реквизиты — проверить юридическое лицо по данным ФНС.\n"
         "  Можно указать ИНН, ОГРН, КПП, название, адрес или несколько реквизитов.\n"
         "  После проверки бот отправляет текст и Excel-файл с четырьмя столбцами.\n"
         "  Можно написать свободно: «Налог, проверь компанию с ИНН 7707083893».\n"
         "/history — показать ранее выполненные проверки в текущем чате.\n"
         "/history ID — показать сохранённый итог конкретной проверки.\n"
+        "/why ID — показать результат, источники, время и покрытие проверки.\n"
+        "/license ИНН — проверить сохранённые сведения о лицензии компании.\n"
+        "/license_add НОМЕР ИНН ДД.ММ.ГГГГ — добавить срок лицензии (администратор).\n"
+        "/license_list — список лицензий и сроков.\n"
+        "/license_monitor [дней] — лицензии, истекающие в указанный срок.\n"
+        "/watch реквизиты — добавить компанию в список мониторинга.\n"
+        "/unwatch реквизиты — убрать компанию из списка мониторинга.\n"
+        "/watched — показать список компаний для мониторинга.\n"
+        "/app — открыть Telegram Mini App (если задан MINI_APP_URL).\n"
         "/check_all (или /check all) — повторно проверить все уникальные юрлица из базы истории (администратор).\n"
         "/feedback ID ОЦЕНКА — отправить оценку результата проверки.\n"
         "  Оценки: correct, incorrect или needs_review.\n\n"
         "/chat_reset — очистить память разговорного диалога в текущем чате.\n\n"
         "Реакции бота на сообщения доверенных пользователей настраиваются через REACTIONS_ENABLED, REACTION_EMOJIS и REACTION_MODE.\n\n"
         "Команды Главного администратора @Sholomon:\n"
-        "/grant @username — выдать пользователю доступ в текущем чате.\n"
+        "/grant @username [viewer|checker|reviewer|manager] — выдать доступ.\n"
         "/revoke @username — отозвать доступ пользователя в текущем чате.\n"
         "/trusted — показать доверенных пользователей текущего чата.\n"
+        "/audit — журнал действий в текущем чате (администратор).\n"
         "/learning_queue — показать очередь обратной связи.\n"
         "/learning_review ID approved|rejected — проверить пример обучения.\n"
         "/learning_export — экспортировать одобренные примеры обучения."
     )
 
 
+def skills_text() -> str:
+    """Краткое описание прикладных возможностей агента для пользователя."""
+    return (
+        "Навыки агента «Налог»:\n\n"
+        "🔎 Проверка юридических лиц — поиск по ИНН, ОГРН, КПП, названию, адресу и свободному описанию.\n"
+        "⚠️ Недостоверность — определение отметок ФНС с разделением на «есть», «нет» и «не распознано».\n"
+        "📄 Лицензии — проверка сохранённых сведений, сроков действия и приближения даты окончания.\n"
+        "📊 Мониторинг — повторные проверки компаний и уведомления об изменениях.\n"
+        "📁 Массовые проверки — обработка CSV/XLSX и Excel-отчёт по результатам.\n"
+        "🧾 Объяснение результата — команда /why показывает источник, время, маркеры и основания вывода.\n"
+        "🗂 История — сохранение результатов и повторный просмотр предыдущих проверок.\n"
+        "💬 Русский диалог — обработка обращений, начинающихся с «Налог».\n"
+        "🧠 Контролируемое обучение — обратная связь пользователей с проверкой администратором.\n"
+        "👥 Доступы — проверка доверенных пользователей, роли и отдельные права в каждом чате.\n"
+        "📋 Аудит — журнал административных действий и операций.\n"
+        "🖥 Mini App — таблица компаний, запуск проверки и добавление в мониторинг.\n\n"
+        "Для команд используйте /help. Пример запроса:\n"
+        "«Налог, проверь компанию с ИНН 7707083893»."
+    )
+
+
 @router.message(CommandStart())
-async def start(message: Message) -> None:
+async def start(message: Message, bot: Bot) -> None:
+    url = _mini_app_url()
+    if url:
+        try:
+            await bot.set_chat_menu_button(
+                chat_id=message.chat.id,
+                menu_button=MenuButtonWebApp(text="Налог", web_app=WebAppInfo(url=url)),
+            )
+        except Exception:
+            logging.warning("Не удалось установить кнопку Mini App для чата %s", message.chat.id, exc_info=True)
     await message.answer(
         "Агент готов. Для проверки используйте /check и реквизиты юридического лица.\n"
         "Можно обратиться свободной фразой: «Налог, проверь компанию с ИНН 7707083893».\n"
@@ -149,6 +221,32 @@ async def start(message: Message) -> None:
 @router.message(Command("help"))
 async def help_command(message: Message) -> None:
     await message.answer(help_text())
+
+
+@router.message(Command("skills", "about"))
+async def skills_command(message: Message) -> None:
+    await message.answer(skills_text())
+
+
+@router.message(Command("app"))
+async def app_command(message: Message, bot: Bot) -> None:
+    url = _mini_app_url()
+    if not url:
+        await message.answer("Mini App пока не опубликован: задайте MINI_APP_URL.")
+        return
+    try:
+        await bot.set_chat_menu_button(
+            chat_id=message.chat.id,
+            menu_button=MenuButtonWebApp(text="Налог", web_app=WebAppInfo(url=url)),
+        )
+    except Exception:
+        logging.warning("Не удалось установить кнопку Mini App для чата %s", message.chat.id, exc_info=True)
+    await message.answer(
+        "Откройте панель проверки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Открыть Mini App", web_app=WebAppInfo(url=url)),
+        ]]),
+    )
 
 
 @router.message(Command("chat_reset"))
@@ -184,7 +282,7 @@ async def check(message: Message, command: CommandObject) -> None:
 
 
 async def _run_check(message: Message, raw_query: str) -> None:
-    if not _allowed(message):
+    if not _can_check(message):
         await message.answer("У вас нет разрешения на выполнение этой команды.")
         return
     if not raw_query.strip():
@@ -220,6 +318,7 @@ async def _run_check(message: Message, raw_query: str) -> None:
         await message.answer("Проверка не выполнена из-за внутренней ошибки. Попробуйте ещё раз.")
     else:
         report = format_assessment(result)
+        _audit(message, "check_completed", "result=success")
         history_event_id = secrets.token_urlsafe(9)
         learning_event_id = None
         if learning_store and message.from_user:
@@ -288,6 +387,7 @@ async def feedback_callback(callback: CallbackQuery) -> None:
         label=label,
         is_admin=is_main_admin(callback.from_user.username),
     )
+    _audit(callback.message, "feedback_added", f"label={label.value}")
     await callback.answer("Спасибо, оценка сохранена." if saved else "Запись не найдена.", show_alert=not saved)
 
 
@@ -312,6 +412,7 @@ async def feedback_command(message: Message, command: CommandObject) -> None:
         note=parts[2] if len(parts) == 3 else None,
         is_admin=is_main_admin(message.from_user.username),
     )
+    _audit(message, "feedback_added", f"label={label.value}")
     await message.answer("Обратная связь сохранена." if saved else "Запись не найдена или недоступна.")
 
 
@@ -358,6 +459,181 @@ async def _show_history(message: Message, event_id: str = "") -> None:
         return
     header = "История проверок текущего чата:\n" if _is_root(message) else "Ваши проверки в текущем чате:\n"
     await message.answer(header + "\n".join(_history_line(entry) for entry in entries))
+
+
+@router.message(Command("why"))
+async def why_command(message: Message, command: CommandObject) -> None:
+    """Показывает объяснимый результат без повторного сетевого запроса."""
+    if not _allowed(message) or not message.from_user or history_store is None:
+        await message.answer("У вас нет разрешения на просмотр результата.")
+        return
+    event_id = (command.args or "").strip()
+    if not event_id:
+        await message.answer("Формат: /why ID проверки. ID можно найти в /history.")
+        return
+    entry = history_store.get_for(event_id=event_id, chat_id=message.chat.id,
+                                 actor_id=message.from_user.id, is_root=_is_root(message))
+    if entry is None:
+        await message.answer("Проверка не найдена или недоступна.")
+        return
+    await message.answer(
+        f"Объяснение проверки {entry.event_id}\n"
+        f"Запрос: {entry.query_text}\n"
+        f"Проверено: {entry.created_at:%d.%m.%Y %H:%M UTC}\n"
+        f"Источник: {entry.source_url}\n"
+        f"Статус недостоверности: {entry.inaccuracy_state}\n"
+        f"Маркеры: {', '.join(entry.inaccuracy_markers) or 'не указаны'}\n\n"
+        f"Полный результат:\n{entry.report}"
+    )
+
+
+def _license_line(record) -> str:
+    left = f"{record.name or record.inn} — {record.license_type}; № {record.license_id}"
+    expiry = record.expires_at.strftime("%d.%m.%Y") if record.expires_at else "не указан"
+    days = record.days_left()
+    suffix = f"; {record.state()}" + (f" ({days} дн.)" if days is not None else "")
+    source = f"; источник: {record.source_url}" if record.source_url else ""
+    return left + f"; до {expiry}" + suffix + source
+
+
+@router.message(Command("license"))
+async def license_command(message: Message, command: CommandObject) -> None:
+    if not _can_check(message) or license_store is None:
+        await message.answer("У вас нет разрешения на проверку лицензий.")
+        return
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer("Формат: /license ИНН 7707083893 или /license ОГРН …")
+        return
+    try:
+        query = parse_search_query(raw)
+    except InvalidIdentifier as exc:
+        await message.answer(f"Не удалось распознать реквизиты: {exc}")
+        return
+    inns = [item.value for item in query.identifiers if item.kind.value == "ИНН"]
+    entity_report = ""
+    if agent is not None:
+        try:
+            result = await agent.check(query)
+            inns = [result.record.inn] if result.record.inn else []
+            entity_report = format_assessment(result)
+        except FnsError as exc:
+            await message.answer(f"Сначала не удалось проверить юридическое лицо по ФНС: {exc}")
+            return
+        except Exception:
+            logging.exception("Не удалось определить ИНН для проверки лицензии")
+    if not inns:
+        await message.answer("Для проверки лицензии нужен ИНН или однозначно найденная компания.")
+        return
+    records = license_store.for_inn(inns[0])
+    if not records:
+        await message.answer(
+            "В локальном реестре лицензий запись не найдена. Это не означает, что лицензии нет: "
+            "подключите официальный источник/добавьте подтверждённую запись через /license_add."
+        )
+        return
+    prefix = (entity_report + "\n\n") if entity_report else ""
+    await message.answer(prefix + "Лицензии компании:\n" + "\n".join(_license_line(item) for item in records))
+
+
+@router.message(Command("license_add"))
+async def license_add_command(message: Message, command: CommandObject) -> None:
+    if not _is_root(message) or license_store is None:
+        await message.answer("Команда доступна Главному администратору @Sholomon.")
+        return
+    parts = (command.args or "").split(maxsplit=3)
+    if len(parts) < 3:
+        await message.answer("Формат: /license_add НОМЕР ИНН ДД.ММ.ГГГГ [тип или примечание]")
+        return
+    try:
+        expires = datetime.strptime(parts[2], "%d.%m.%Y").date()
+    except ValueError:
+        await message.answer("Дата должна быть в формате ДД.ММ.ГГГГ.")
+        return
+    record = new_license(license_id=parts[0], inn=parts[1], expires_at=expires,
+                         notes=parts[3] if len(parts) == 4 else None)
+    license_store.upsert(record)
+    _audit(message, "license_add", "license_record_created")
+    await message.answer(f"Лицензия {parts[0]} сохранена до {expires:%d.%m.%Y}.")
+
+
+@router.message(Command("license_list"))
+async def license_list_command(message: Message) -> None:
+    if not _allowed(message) or license_store is None:
+        await message.answer("У вас нет разрешения на просмотр лицензий.")
+        return
+    records = license_store.all()
+    await message.answer("Лицензий в реестре нет." if not records else "\n".join(_license_line(item) for item in records))
+
+
+@router.message(Command("license_monitor"))
+async def license_monitor_command(message: Message, command: CommandObject) -> None:
+    if not _allowed(message) or license_store is None:
+        await message.answer("У вас нет разрешения на мониторинг лицензий.")
+        return
+    try:
+        days = int((command.args or "30").strip())
+    except ValueError:
+        days = 30
+    days = max(1, min(days, 3650))
+    records = license_store.expiring(days)
+    if not records:
+        await message.answer(f"Лицензий, истекающих в ближайшие {days} дней, не найдено.")
+        return
+    await message.answer(f"Истекают в ближайшие {days} дней:\n" + "\n".join(_license_line(item) for item in records))
+
+
+@router.message(Command("audit"))
+async def audit_command(message: Message) -> None:
+    if not _is_root(message) or audit_store is None:
+        await message.answer("Команда доступна Главному администратору @Sholomon.")
+        return
+    rows = audit_store.recent(message.chat.id)
+    if not rows:
+        await message.answer("Журнал действий пуст.")
+        return
+    await message.answer("Журнал действий:\n" + "\n".join(
+        f"{row['created_at'][:19]} — {row['action']} — {row['details']}" for row in rows
+    ))
+
+
+@router.message(Command("watch"))
+async def watch_command(message: Message, command: CommandObject) -> None:
+    if not _allowed(message) or not message.from_user or watch_store is None:
+        await message.answer("У вас нет разрешения на мониторинг компаний.")
+        return
+    query = (command.args or "").strip()
+    if not query:
+        await message.answer("Формат: /watch ИНН 7707083893")
+        return
+    watch_store.add(message.chat.id, query, message.from_user.id)
+    _audit(message, "watch_added", "company_added")
+    await message.answer("Компания добавлена в список мониторинга. Периодический планировщик подключим после настройки интервала и канала уведомлений.")
+
+
+@router.message(Command("unwatch"))
+async def unwatch_command(message: Message, command: CommandObject) -> None:
+    if not _allowed(message) or watch_store is None:
+        await message.answer("У вас нет разрешения на изменение мониторинга.")
+        return
+    query = (command.args or "").strip()
+    if not query:
+        await message.answer("Формат: /unwatch ИНН 7707083893")
+        return
+    removed = watch_store.remove(message.chat.id, query)
+    if removed:
+        _audit(message, "watch_removed", "company_removed")
+    await message.answer("Компания удалена из списка мониторинга." if removed
+                         else "Такой компании нет в списке мониторинга.")
+
+
+@router.message(Command("watched"))
+async def watched_command(message: Message) -> None:
+    if not _allowed(message) or watch_store is None:
+        await message.answer("У вас нет разрешения на просмотр мониторинга.")
+        return
+    items = watch_store.list(message.chat.id)
+    await message.answer("Список мониторинга пуст." if not items else "Компании в мониторинге:\n" + "\n".join(items))
 
 
 def _positive_env_int(name: str, default: int) -> int:
@@ -435,6 +711,7 @@ async def check_all(message: Message) -> None:
         f"Запускаю повторную проверку {len(queries)} уникальных юридических лиц. "
         f"Одновременно выполняется до {concurrency} запросов."
     )
+    _audit(message, "check_all_started", f"count={len(queries)}")
     semaphore = asyncio.Semaphore(concurrency)
 
     async def process(query):
@@ -450,7 +727,7 @@ async def check_all(message: Message) -> None:
                     except Exception:
                         logging.exception("Не удалось сохранить ошибку массовой проверки в журнал обучения")
                 return False, f"❌ {query.value} — {exc}", row_from_error(query.value, str(exc))
-            except Exception as exc:  # pragma: no cover - защитный контур для массовой операции
+            except Exception:  # pragma: no cover - защитный контур для массовой операции
                 logging.exception("Ошибка массовой проверки запроса %s", query.value)
                 if learning_store:
                     try:
@@ -504,8 +781,9 @@ async def check_all(message: Message) -> None:
     ]
     lines.extend(line for _, line, _ in outcomes)
     await _answer_chunks(message, lines)
+    _audit(message, "check_all_completed", f"success={succeeded};failed={failed}")
     workbook_rows = [row for _, _, row in outcomes]
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     try:
         await message.answer_document(
             BufferedInputFile(
@@ -517,6 +795,100 @@ async def check_all(message: Message) -> None:
     except Exception:
         logging.exception("Не удалось отправить Excel-отчёт массовой проверки")
         await message.answer("Текстовая сводка готова, но Excel-файл отправить не удалось.")
+
+
+@router.message(F.document)
+async def bulk_document(message: Message, bot: Bot) -> None:
+    """Проверяет CSV/XLSX по подписи «/bulk» или «проверить файл»."""
+    caption = (message.caption or "").casefold()
+    if not any(marker in caption for marker in ("/bulk", "проверить файл", "проверь файл")):
+        return
+    if not _can_check(message) or agent is None or not message.document:
+        await message.answer("У вас нет разрешения на массовую проверку.")
+        return
+    try:
+        file = await bot.get_file(message.document.file_id)
+        buffer = __import__("io").BytesIO()
+        await bot.download_file(file.file_path, destination=buffer)
+        queries = parse_upload(message.document.file_name or "upload.csv", buffer.getvalue())
+    except (ValueError, StopIteration) as exc:
+        await message.answer(f"Не удалось прочитать файл: {exc}")
+        return
+    except Exception:
+        logging.exception("Ошибка загрузки массового файла")
+        await message.answer("Не удалось загрузить файл. Поддерживаются CSV и XLSX.")
+        return
+    if not queries:
+        await message.answer("В файле не найдено строк с реквизитами юридических лиц.")
+        return
+    max_rows = _positive_env_int("BULK_MAX_ROWS", 500)
+    if len(queries) > max_rows:
+        await message.answer(f"За один запуск можно проверить до {max_rows} строк.")
+        return
+    unique: list = []
+    seen: set[str] = set()
+    for query in queries:
+        key = " ".join(query.value.split()).casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(query)
+    queries = unique
+    rows = []
+    lines = [f"Начинаю массовую проверку: {len(queries)} уникальных строк."]
+    semaphore = asyncio.Semaphore(_positive_env_int("BULK_CONCURRENCY", 3))
+
+    async def process(query):
+        async with semaphore:
+            try:
+                result = await agent.check(query)
+                report = format_assessment(result)
+                event_id = secrets.token_urlsafe(9)
+                if history_store and message.from_user:
+                    history_store.record_check(event_id=event_id, chat_id=message.chat.id,
+                                               actor_id=message.from_user.id, query=query,
+                                               assessment=result, report=report)
+                return True, _bulk_result_line(query.value, event_id, result), row_from_assessment(result)
+            except Exception as exc:
+                logging.exception("Ошибка массовой проверки %s", query.value)
+                return False, f"❌ {query.value} — проверка не выполнена", row_from_error(query.value, str(exc))
+
+    completed = 0
+    for task in asyncio.as_completed([process(query) for query in queries]):
+        _success, line, row = await task
+        completed += 1
+        rows.append(row)
+        lines.append(line)
+        if completed % 10 == 0 or completed == len(queries):
+            await message.answer(f"Массовая проверка: {completed}/{len(queries)} обработано.")
+    await _answer_chunks(message, lines)
+    try:
+        await message.answer_document(BufferedInputFile(build_check_workbook(rows), filename="bulk_check.xlsx"),
+                                      caption="Результаты массовой проверки в формате Excel.")
+    except Exception:
+        logging.exception("Не удалось отправить массовый Excel-отчёт")
+
+
+@router.message(F.web_app_data)
+async def mini_app_data(message: Message) -> None:
+    if not message.web_app_data:
+        return
+    try:
+        payload = __import__("json").loads(message.web_app_data.data)
+    except (TypeError, ValueError):
+        await message.answer("Mini App передал некорректные данные.")
+        return
+    if payload.get("action") not in {"check", "watch"} or not isinstance(payload.get("query"), str):
+        await message.answer("Неизвестное действие Mini App.")
+        return
+    if payload["action"] == "watch":
+        if not _allowed(message) or not message.from_user or watch_store is None:
+            await message.answer("У вас нет разрешения на мониторинг компаний.")
+            return
+        watch_store.add(message.chat.id, payload["query"], message.from_user.id)
+        _audit(message, "watch_added", "company_added_from_mini_app")
+        await message.answer("Компания добавлена в мониторинг.")
+        return
+    await _run_check(message, payload["query"])
 
 
 @router.message(Command("learning_queue"))
@@ -550,6 +922,7 @@ async def learning_review(message: Message, command: CommandObject) -> None:
         approved=parts[1] == "approved",
         correction=parts[2] if len(parts) == 3 else None,
     )
+    _audit(message, "learning_review", f"approved={parts[1] == 'approved'}")
     await message.answer("Запись обработана." if saved else "Запись не найдена.")
 
 
@@ -560,6 +933,7 @@ async def learning_export(message: Message, command: CommandObject) -> None:
         return
     export_path = os.getenv("LEARNING_EXPORT_PATH", "data/learning.jsonl")
     count = learning_store.export_jsonl(export_path)
+    _audit(message, "learning_export", f"count={count}")
     await message.answer(f"Экспортировано одобренных примеров: {count}.")
 
 
@@ -577,6 +951,12 @@ def _target_user(message: Message, command: CommandObject) -> tuple[str | None, 
     return tag, target_id
 
 
+def _requested_role(command: CommandObject) -> str:
+    parts = (command.args or "").split()
+    role = parts[1].casefold() if len(parts) > 1 else "checker"
+    return role if role in {"viewer", "checker", "reviewer", "manager"} else "checker"
+
+
 @router.message(Command("grant"))
 async def grant_access(message: Message, command: CommandObject) -> None:
     if not _is_root(message) or not message.from_user or access_store is None:
@@ -591,8 +971,10 @@ async def grant_access(message: Message, command: CommandObject) -> None:
         username=tag,
         user_id=target_id,
         granted_by=message.from_user.id,
+        role=_requested_role(command),
     ):
-        await message.answer(f"Пользователю @{tag} выдан доступ в этом чате.")
+        _audit(message, "access_granted", f"role={_requested_role(command)}")
+        await message.answer(f"Пользователю @{tag} выдан доступ в этом чате с ролью {_requested_role(command)}.")
     else:
         await message.answer("Нельзя выдать доступ Главному администратору или указан некорректный тег.")
 
@@ -612,6 +994,7 @@ async def revoke_access(message: Message, command: CommandObject) -> None:
         user_id=target_id,
         revoked_by=message.from_user.id,
     ):
+        _audit(message, "access_revoked", "user_access_revoked")
         await message.answer(f"Доступ пользователя @{tag} отозван в этом чате.")
     else:
         await message.answer("Нельзя отозвать доступ Главного администратора или указан некорректный тег.")
@@ -627,7 +1010,7 @@ async def trusted_users(message: Message) -> None:
         await message.answer("В этом чате нет выданных прав. Главный администратор: @Sholomon.")
         return
     lines = ["Доверенные пользователи этого чата:", "@Sholomon — Главный администратор"]
-    lines.extend(f"@{user.tag}" for user in users)
+    lines.extend(f"@{user.tag} — {user.role}" for user in users)
     await message.answer("\n".join(lines))
 
 
@@ -644,7 +1027,7 @@ async def natural_language(message: Message) -> None:
         await message.answer(
             "Я — Налог, агент проверки юридических лиц. "
             "Обратитесь ко мне, например: «Налог, проверь компанию с ИНН 7707083893».\n\n"
-            + help_text()
+            + skills_text()
         )
     elif request.intent is NaturalIntent.GREETING:
         await message.answer(
@@ -653,6 +1036,11 @@ async def natural_language(message: Message) -> None:
         )
     elif request.intent is NaturalIntent.CHECK:
         await _run_check(message, request.query_text)
+    elif request.intent is NaturalIntent.LICENSE:
+        # Используем тот же парсер реквизитов, что и обычная проверка; команда
+        # /license далее гарантирует, что отсутствие записи не трактуется как
+        # отсутствие лицензии.
+        await license_command(message, CommandObject(args=request.query_text))
     elif request.intent is NaturalIntent.CHECK_ALL:
         await check_all(message)
     elif request.intent is NaturalIntent.HISTORY:
@@ -679,13 +1067,76 @@ async def natural_language(message: Message) -> None:
             await message.answer(answer)
 
 
+async def _monitor_loop(bot: Bot, interval_seconds: int) -> None:
+    """Периодически проверяет watchlist и сообщает лишь об изменениях.
+
+    Ошибка источника пропускает цикл и не создаёт ложное уведомление об
+    отсутствии риска. Первая успешная проверка формирует базовый снимок.
+    """
+    notified_licenses: set[tuple[str, str, str, str]] = set()
+    semaphore = asyncio.Semaphore(_positive_env_int("MONITOR_CONCURRENCY", 2))
+    while True:
+        try:
+            if watch_store and agent:
+                for chat_id, raw_query, _ in watch_store.entries():
+                    async with semaphore:
+                        result = None
+                        for attempt in range(3):
+                            try:
+                                query = parse_search_query(raw_query)
+                                result = await agent.check(query)
+                                break
+                            except Exception:
+                                if attempt == 2:
+                                    logging.warning("Мониторинг пропущен для %s", raw_query, exc_info=True)
+                                else:
+                                    await asyncio.sleep(2 ** attempt)
+                        if result is None:
+                            continue
+                    record = result.record
+                    snapshot = "|".join(str(item) for item in (
+                        record.name, record.inn, record.ogrn, record.kpp,
+                        record.status, record.inaccuracy_state.value,
+                        ",".join(record.inaccuracy_markers),
+                    ))
+                    if watch_store.update_snapshot(chat_id, raw_query, snapshot):
+                        await bot.send_message(
+                            int(chat_id),
+                            "⚠️ Изменились данные компании в мониторинге.\n\n" + format_assessment(result),
+                        )
+            if license_store:
+                for license_record in license_store.expiring(_positive_env_int("LICENSE_ALERT_DAYS", 30)):
+                    days = license_record.days_left()
+                    # Лицензионные уведомления направляются в чаты, где есть
+                    # компании из watchlist и совпадает ИНН.
+                    if watch_store:
+                        for chat_id, raw_query, _ in watch_store.entries():
+                            if license_record.inn not in raw_query:
+                                continue
+                            key = (str(chat_id), license_record.license_id,
+                                   str(license_record.expires_at), str(days))
+                            if key in notified_licenses:
+                                continue
+                            notified_licenses.add(key)
+                            await bot.send_message(
+                                int(chat_id),
+                                f"⏰ Лицензия {license_record.license_id} истекает через {days} дней.\n"
+                                f"{_license_line(license_record)}",
+                            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("Ошибка фонового мониторинга")
+        await asyncio.sleep(interval_seconds)
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     return default if value is None else value.strip().casefold() in {"1", "true", "yes", "да"}
 
 
 async def _run() -> None:
-    global agent, access_store, learning_store, history_store, chat_skill
+    global agent, access_store, learning_store, history_store, license_store, audit_store, watch_store, chat_skill
     global reaction_settings
     load_dotenv()
     token = os.getenv("BOT_TOKEN")
@@ -719,6 +1170,9 @@ async def _run() -> None:
         os.getenv("HISTORY_DB_PATH", "data/history.sqlite3"),
         hash_salt=hash_salt,
     )
+    license_store = LicenseStore(os.getenv("LICENSE_DB_PATH", "data/licenses.sqlite3"))
+    audit_store = AuditStore(os.getenv("AUDIT_DB_PATH", "data/audit.sqlite3"))
+    watch_store = WatchStore(os.getenv("WATCH_DB_PATH", "data/watchlist.sqlite3"))
     chat_skill = ChatSkill.from_env()
     reaction_settings = ReactionSettings.from_env()
     retention = os.getenv("LEARNING_RETENTION_DAYS", "").strip()
@@ -731,9 +1185,14 @@ async def _run() -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
+    monitor_task = asyncio.create_task(
+        _monitor_loop(bot, _positive_env_int("MONITOR_INTERVAL_SECONDS", 86400))
+    )
     try:
         await dispatcher.start_polling(bot)
     finally:
+        monitor_task.cancel()
+        await asyncio.gather(monitor_task, return_exceptions=True)
         await bot.session.close()
         if agent:
             await agent.close()
@@ -743,6 +1202,12 @@ async def _run() -> None:
             access_store.close()
         if history_store:
             history_store.close()
+        if license_store:
+            license_store.close()
+        if audit_store:
+            audit_store.close()
+        if watch_store:
+            watch_store.close()
 
 
 def main() -> None:
