@@ -7,7 +7,6 @@ from typing import Any
 
 from .models import FnsEntityRecord, Identifier, InaccuracyState, SearchQuery
 
-
 _INACCURACY_WORDS = ("недостовер", "признак недостоверности", "недостоверность")
 _ABSENT_PHRASES = (
     "недостоверные сведения отсутствуют",
