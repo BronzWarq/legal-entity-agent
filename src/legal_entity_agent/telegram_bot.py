@@ -4,11 +4,13 @@ import asyncio
 import logging
 import os
 import secrets
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram import F
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -22,6 +24,7 @@ from dotenv import load_dotenv
 from .agent import LegalEntityAgent
 from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
+from .excel_export import build_check_workbook, row_from_assessment, row_from_error
 from .fns_client import FnsError
 from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
@@ -221,6 +224,14 @@ async def _run_check(message: Message, raw_query: str) -> None:
             report + suffix,
             reply_markup=_feedback_keyboard(event_id) if event_id else None,
         )
+        filename_id = event_id or "result"
+        await message.answer_document(
+            BufferedInputFile(
+                build_check_workbook([row_from_assessment(result)]),
+                filename=f"check_{filename_id}.xlsx",
+            ),
+            caption="Результат проверки в формате Excel.",
+        )
 
 
 @router.callback_query(F.data.startswith("feedback:"))
@@ -389,14 +400,14 @@ async def check_all(message: Message) -> None:
                     learning_store.record_failure(
                         actor_id=str(message.from_user.id), identifier=query, error=str(exc)
                     )
-                return False, f"❌ {query.value} — {exc}"
+                return False, f"❌ {query.value} — {exc}", row_from_error(query.value, str(exc))
             except Exception as exc:  # pragma: no cover - защитный контур для массовой операции
                 logging.exception("Ошибка массовой проверки запроса %s", query.value)
                 if learning_store:
                     learning_store.record_failure(
                         actor_id=str(message.from_user.id), identifier=query, error="internal error"
                     )
-                return False, f"❌ {query.value} — внутренняя ошибка проверки"
+                return False, f"❌ {query.value} — внутренняя ошибка проверки", row_from_error(query.value, "внутренняя ошибка проверки")
 
             report = format_assessment(result)
             event_id = (
@@ -417,17 +428,26 @@ async def check_all(message: Message) -> None:
                 assessment=result,
                 report=report,
             )
-            return True, _bulk_result_line(query.value, event_id, result)
+            return True, _bulk_result_line(query.value, event_id, result), row_from_assessment(result)
 
     outcomes = await asyncio.gather(*(process(query) for query in queries))
-    succeeded = sum(1 for success, _ in outcomes if success)
+    succeeded = sum(1 for success, _, _ in outcomes if success)
     failed = len(outcomes) - succeeded
     lines = [
         f"Массовая проверка завершена: успешно — {succeeded}, с ошибкой — {failed}.",
         "Результаты сохранены в историю текущего чата:",
     ]
-    lines.extend(line for _, line in outcomes)
+    lines.extend(line for _, line, _ in outcomes)
     await _answer_chunks(message, lines)
+    workbook_rows = [row for _, _, row in outcomes]
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    await message.answer_document(
+        BufferedInputFile(
+            build_check_workbook(workbook_rows),
+            filename=f"check_all_{timestamp}.xlsx",
+        ),
+        caption="Результаты массовой проверки в формате Excel.",
+    )
 
 
 @router.message(Command("learning_queue"))
