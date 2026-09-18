@@ -1,6 +1,7 @@
 """Проверка сведений о юридических лицах по сервисам ФНС."""
 
 from .agent import LegalEntityAgent
+from .conversation import NaturalIntent, NaturalRequest, parse_natural_request
 from .identifiers import InvalidIdentifier, parse_search_query
 from .history import HistoryEntry, HistoryStore
 from .learning import FeedbackLabel, LearningEvent, LearningStore
@@ -20,8 +21,11 @@ __all__ = [
     "LearningEvent",
     "LearningStore",
     "LegalEntityAgent",
+    "NaturalIntent",
+    "NaturalRequest",
     "SearchQuery",
     "parse_search_query",
+    "parse_natural_request",
     "ChatAccessStore",
     "TrustedUser",
     "is_main_admin",

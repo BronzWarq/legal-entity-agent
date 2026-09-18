@@ -12,6 +12,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from dotenv import load_dotenv
 
 from .agent import LegalEntityAgent
+from .conversation import NaturalIntent, parse_natural_request
 from .fns_client import FnsError
 from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
@@ -51,6 +52,7 @@ def help_text() -> str:
         "/help — показать этот список команд.\n"
         "/check реквизиты — проверить юридическое лицо по данным ФНС.\n"
         "  Можно указать ИНН, ОГРН, КПП, название, адрес или несколько реквизитов.\n"
+        "  Можно написать свободно: «Налог, проверь компанию с ИНН 7707083893».\n"
         "/history — показать ранее выполненные проверки в текущем чате.\n"
         "/history ID — показать сохранённый итог конкретной проверки.\n"
         "/check_all (или /check all) — повторно проверить все уникальные юрлица из базы истории (администратор).\n"
@@ -70,6 +72,7 @@ def help_text() -> str:
 async def start(message: Message) -> None:
     await message.answer(
         "Агент готов. Для проверки используйте /check и реквизиты юридического лица.\n"
+        "Можно обратиться свободной фразой: «Налог, проверь компанию с ИНН 7707083893».\n"
         "После ответа можно поставить оценку кнопками обратной связи.\n"
         "Для полного списка команд используйте /help."
     )
@@ -97,15 +100,22 @@ async def check(message: Message, command: CommandObject) -> None:
     if command.args and command.args.strip().casefold() == "all":
         await check_all(message)
         return
+    await _run_check(message, command.args or "")
+
+
+async def _run_check(message: Message, raw_query: str) -> None:
     if not _allowed(message):
         await message.answer("У вас нет разрешения на выполнение этой команды.")
         return
-    if not command.args:
+    if not raw_query.strip():
         await message.answer("Формат: /check ИНН 7707083893 КПП 770401001")
         return
+    if agent is None:
+        await message.answer("Проверка сейчас недоступна: агент не настроен.")
+        return
     try:
-        query = parse_search_query(command.args)
-        result = await agent.check(query)  # type: ignore[union-attr]
+        query = parse_search_query(raw_query)
+        result = await agent.check(query)
     except InvalidIdentifier as exc:
         await message.answer(f"Не удалось распознать реквизиты: {exc}")
     except FnsError as exc:
@@ -204,10 +214,13 @@ def _history_line(entry: HistoryEntry) -> str:
 
 @router.message(Command("history"))
 async def history(message: Message, command: CommandObject) -> None:
+    await _show_history(message, (command.args or "").strip())
+
+
+async def _show_history(message: Message, event_id: str = "") -> None:
     if not _allowed(message) or not message.from_user or history_store is None:
         await message.answer("У вас нет разрешения на просмотр истории проверок.")
         return
-    event_id = (command.args or "").strip()
     if event_id:
         entry = history_store.get_for(
             event_id=event_id,
@@ -449,6 +462,40 @@ async def trusted_users(message: Message) -> None:
     lines = ["Доверенные пользователи этого чата:", "@Sholomon — Главный администратор"]
     lines.extend(f"@{user.tag}" for user in users)
     await message.answer("\n".join(lines))
+
+
+@router.message()
+async def natural_language(message: Message) -> None:
+    """Обрабатывает русские сообщения, начинающиеся с обращения «Налог»."""
+
+    if not message.text:
+        return
+    request = parse_natural_request(message.text)
+    if request is None:
+        return
+    if request.intent is NaturalIntent.HELP:
+        await message.answer(
+            "Я — Налог, агент проверки юридических лиц. "
+            "Обратитесь ко мне, например: «Налог, проверь компанию с ИНН 7707083893».\n\n"
+            + help_text()
+        )
+    elif request.intent is NaturalIntent.GREETING:
+        await message.answer(
+            "Здравствуйте. Я готов проверить юридическое лицо по ИНН, ОГРН, КПП, "
+            "названию, адресу или другим данным. Например: «Налог, проверь компанию с ИНН 7707083893»."
+        )
+    elif request.intent is NaturalIntent.CHECK:
+        await _run_check(message, request.query_text)
+    elif request.intent is NaturalIntent.CHECK_ALL:
+        await check_all(message)
+    elif request.intent is NaturalIntent.HISTORY:
+        await _show_history(message)
+    else:
+        await message.answer(
+            "Я понимаю запросы на проверку юридических лиц. "
+            "Напишите: «Налог, проверь компанию с ИНН 7707083893» "
+            "или используйте /help."
+        )
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
