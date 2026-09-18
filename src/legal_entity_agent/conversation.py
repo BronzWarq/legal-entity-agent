@@ -13,6 +13,7 @@ class NaturalIntent(StrEnum):
     CHECK = "check"
     CHECK_ALL = "check_all"
     HISTORY = "history"
+    LICENSE = "license"
     UNKNOWN = "unknown"
 
 
@@ -39,6 +40,7 @@ _CHECK_WORDS = (
     "обнови",
     "обновить",
 )
+_LICENSE_WORDS = ("лицензи", "алкоголь", "розничн", "разрешени")
 
 
 def _clean_query(body: str) -> str:
@@ -92,7 +94,7 @@ def parse_natural_request(text: str) -> NaturalRequest | None:
     lowered = body.casefold()
     if not body:
         return NaturalRequest(NaturalIntent.HELP)
-    if any(marker in lowered for marker in ("помоги", "что ты умеешь", "справк", "команд")):
+    if any(marker in lowered for marker in ("помоги", "что ты умеешь", "что умеешь", "навык", "возможност", "скилл", "справк", "команд")):
         return NaturalRequest(NaturalIntent.HELP)
     if re.match(
         r"(?iu)^(?:привет|здравствуй|добрый\s+день|доброе\s+утро|добрый\s+вечер)\b",
@@ -105,6 +107,11 @@ def parse_natural_request(text: str) -> NaturalRequest | None:
         return NaturalRequest(NaturalIntent.CHECK_ALL)
     if any(marker in lowered for marker in ("истори", "ранее провер", "предыдущ")):
         return NaturalRequest(NaturalIntent.HISTORY)
+
+    if any(marker in lowered for marker in _LICENSE_WORDS) and (
+        has_check_word or bool(_IDENTIFIER_RE.search(body) or _NUMBER_RE.search(body))
+    ):
+        return NaturalRequest(NaturalIntent.LICENSE, _clean_query(body))
 
     query_text = _clean_query(body)
     has_identifier = bool(_IDENTIFIER_RE.search(body) or _NUMBER_RE.search(body))
