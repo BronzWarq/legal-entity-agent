@@ -27,3 +27,21 @@ def test_parser_detects_present_inaccuracy() -> None:
         "https://egrul.nalog.ru/search-result/test",
     )
     assert record.inaccuracy_state is InaccuracyState.PRESENT
+
+
+def test_parser_does_not_treat_unqualified_inaccuracy_word_as_positive() -> None:
+    record = parse_fns_payload(
+        {"name": "ООО Ромашка", "message": "Проверка недостоверности доступна"},
+        Identifier("7707083893", IdentifierKind.INN),
+        "https://egrul.nalog.ru/search-result/test",
+    )
+    assert record.inaccuracy_state is InaccuracyState.NOT_REPORTED
+
+
+def test_parser_accepts_structured_inaccuracy_flag() -> None:
+    record = parse_fns_payload(
+        {"name": "ООО Ромашка", "has_inaccuracy": True},
+        Identifier("7707083893", IdentifierKind.INN),
+        "https://egrul.nalog.ru/search-result/test",
+    )
+    assert record.inaccuracy_state is InaccuracyState.PRESENT
