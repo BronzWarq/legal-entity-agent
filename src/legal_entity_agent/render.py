@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from .models import Assessment, InaccuracyState
 
-
 _VERDICT_LABELS = {
     "safe_to_proceed": "можно продолжать после стандартной проверки документов",
     "manual_review_required": "требуется ручная проверка",
