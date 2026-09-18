@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "legal-entity-agent"
+version = "0.4.0"
+description = "Агент для проверки сведений о юридических лицах по официальным сервисам ФНС"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27,<1",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+bot = ["aiogram>=3.20,<4"]
+test = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<1",
+]
+
+[project.scripts]
+legal-entity-check = "legal_entity_agent.cli:main"
+legal-entity-bot = "legal_entity_agent.telegram_bot:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+where = ["src"]
