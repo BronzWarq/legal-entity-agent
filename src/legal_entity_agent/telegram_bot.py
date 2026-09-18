@@ -18,14 +18,13 @@ from aiogram.types import (
     ReactionTypeCustomEmoji,
     ReactionTypeEmoji,
 )
-from aiogram.exceptions import TelegramAPIError
 from dotenv import load_dotenv
 
 from .agent import LegalEntityAgent
 from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
 from .excel_export import build_check_workbook, row_from_assessment, row_from_error
-from .fns_client import FnsError
+from .fns_client import FnsEgrulClient, FnsError
 from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
@@ -43,13 +42,16 @@ reaction_settings = ReactionSettings()
 
 
 def _allowed(message: Message) -> bool:
+    return bool(message.from_user and _allowed_user(message.chat.id, message.from_user))
+
+
+def _allowed_user(chat_id: int, user) -> bool:
     return bool(
         access_store
-        and message.from_user
         and access_store.is_allowed(
-            message.chat.id,
-            user_id=message.from_user.id,
-            username=message.from_user.username,
+            chat_id,
+            user_id=user.id,
+            username=user.username,
         )
     )
 
@@ -85,7 +87,7 @@ async def _react_to_message(message: Message, bot: Bot) -> None:
             reaction=[reaction],
             is_big=False,
         )
-    except TelegramAPIError:
+    except Exception:
         logging.warning(
             "Не удалось поставить реакцию %s в чате %s на сообщение %s",
             reaction_label,
@@ -114,6 +116,7 @@ def help_text() -> str:
         "/help — показать этот список команд.\n"
         "/check реквизиты — проверить юридическое лицо по данным ФНС.\n"
         "  Можно указать ИНН, ОГРН, КПП, название, адрес или несколько реквизитов.\n"
+        "  После проверки бот отправляет текст и Excel-файл с четырьмя столбцами.\n"
         "  Можно написать свободно: «Налог, проверь компанию с ИНН 7707083893».\n"
         "/history — показать ранее выполненные проверки в текущем чате.\n"
         "/history ID — показать сохранённый итог конкретной проверки.\n"
@@ -189,54 +192,84 @@ async def _run_check(message: Message, raw_query: str) -> None:
     if agent is None:
         await message.answer("Проверка сейчас недоступна: агент не настроен.")
         return
+    query = None
     try:
         query = parse_search_query(raw_query)
         result = await agent.check(query)
     except InvalidIdentifier as exc:
         await message.answer(f"Не удалось распознать реквизиты: {exc}")
     except FnsError as exc:
-        if learning_store and message.from_user:
-            learning_store.record_failure(
-                actor_id=str(message.from_user.id), identifier=query, error=str(exc)
-            )
+        if learning_store and message.from_user and query is not None:
+            try:
+                learning_store.record_failure(
+                    actor_id=str(message.from_user.id), identifier=query, error=str(exc)
+                )
+            except Exception:
+                logging.exception("Не удалось сохранить ошибку проверки в журнал обучения")
         await message.answer(f"Проверка ФНС не выполнена: {exc}")
+    except Exception:
+        logging.exception("Непредвиденная ошибка одиночной проверки")
+        if learning_store and message.from_user and query is not None:
+            try:
+                learning_store.record_failure(
+                    actor_id=str(message.from_user.id), identifier=query, error="internal error"
+                )
+            except Exception:
+                logging.exception("Не удалось сохранить внутреннюю ошибку в журнал обучения")
+        await message.answer("Проверка не выполнена из-за внутренней ошибки. Попробуйте ещё раз.")
     else:
         report = format_assessment(result)
-        event_id = None
+        history_event_id = secrets.token_urlsafe(9)
+        learning_event_id = None
         if learning_store and message.from_user:
-            event_id = learning_store.record_check(
-                actor_id=str(message.from_user.id),
-                identifier=query,
-                assessment=result,
-                rendered_response=report,
-            )
-        if history_store and message.from_user and event_id:
-            history_store.record_check(
-                event_id=event_id,
-                chat_id=message.chat.id,
-                actor_id=message.from_user.id,
-                query=query,
-                assessment=result,
-                report=report,
-            )
+            try:
+                learning_event_id = learning_store.record_check(
+                    actor_id=str(message.from_user.id),
+                    identifier=query,
+                    assessment=result,
+                    rendered_response=report,
+                )
+                history_event_id = learning_event_id
+            except Exception:
+                logging.exception("Не удалось сохранить результат в журнал обучения")
+        if history_store and message.from_user:
+            try:
+                history_store.record_check(
+                    event_id=history_event_id,
+                    chat_id=message.chat.id,
+                    actor_id=message.from_user.id,
+                    query=query,
+                    assessment=result,
+                    report=report,
+                )
+            except Exception:
+                logging.exception("Не удалось сохранить результат в историю проверок")
         suffix = "\n\nОцените результат, чтобы агент мог улучшаться после проверки администратора."
         await message.answer(
             report + suffix,
-            reply_markup=_feedback_keyboard(event_id) if event_id else None,
+            reply_markup=_feedback_keyboard(learning_event_id) if learning_event_id else None,
         )
-        filename_id = event_id or "result"
-        await message.answer_document(
-            BufferedInputFile(
-                build_check_workbook([row_from_assessment(result)]),
-                filename=f"check_{filename_id}.xlsx",
-            ),
-            caption="Результат проверки в формате Excel.",
-        )
+        try:
+            filename_id = history_event_id or "result"
+            await message.answer_document(
+                BufferedInputFile(
+                    build_check_workbook([row_from_assessment(result)]),
+                    filename=f"check_{filename_id}.xlsx",
+                ),
+                caption="Результат проверки в формате Excel.",
+            )
+        except Exception:
+            logging.exception("Не удалось отправить Excel-отчёт одиночной проверки")
+            await message.answer("Текстовый результат готов, но Excel-файл отправить не удалось.")
 
 
 @router.callback_query(F.data.startswith("feedback:"))
 async def feedback_callback(callback: CallbackQuery) -> None:
-    if not callback.from_user or not callback.message or not _allowed(callback.message):
+    if (
+        not callback.from_user
+        or not callback.message
+        or not _allowed_user(callback.message.chat.id, callback.from_user)
+    ):
         await callback.answer("Нет разрешения на отправку обратной связи.", show_alert=True)
         return
     parts = (callback.data or "").split(":", 2)
@@ -338,6 +371,18 @@ def _positive_env_int(name: str, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _positive_env_float(name: str, default: float) -> float:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        logging.warning("%s должен быть числом; используется значение %s.", name, default)
+        return default
+    return parsed if parsed > 0 else default
+
+
 async def _answer_chunks(message: Message, lines: list[str], *, limit: int = 3900) -> None:
     """Отправляет длинный итог несколькими сообщениями в пределах лимита Telegram."""
 
@@ -397,38 +442,57 @@ async def check_all(message: Message) -> None:
                 result = await agent.check(query)
             except FnsError as exc:
                 if learning_store:
-                    learning_store.record_failure(
-                        actor_id=str(message.from_user.id), identifier=query, error=str(exc)
-                    )
+                    try:
+                        learning_store.record_failure(
+                            actor_id=str(message.from_user.id), identifier=query, error=str(exc)
+                        )
+                    except Exception:
+                        logging.exception("Не удалось сохранить ошибку массовой проверки в журнал обучения")
                 return False, f"❌ {query.value} — {exc}", row_from_error(query.value, str(exc))
             except Exception as exc:  # pragma: no cover - защитный контур для массовой операции
                 logging.exception("Ошибка массовой проверки запроса %s", query.value)
                 if learning_store:
-                    learning_store.record_failure(
-                        actor_id=str(message.from_user.id), identifier=query, error="internal error"
-                    )
+                    try:
+                        learning_store.record_failure(
+                            actor_id=str(message.from_user.id), identifier=query, error="internal error"
+                        )
+                    except Exception:
+                        logging.exception("Не удалось сохранить внутреннюю ошибку в журнал обучения")
                 return False, f"❌ {query.value} — внутренняя ошибка проверки", row_from_error(query.value, "внутренняя ошибка проверки")
 
-            report = format_assessment(result)
-            event_id = (
-                learning_store.record_check(
-                    actor_id=str(message.from_user.id),
-                    identifier=query,
-                    assessment=result,
-                    rendered_response=report,
-                )
-                if learning_store
-                else secrets.token_urlsafe(9)
-            )
-            history_store.record_check(
-                event_id=event_id,
-                chat_id=message.chat.id,
-                actor_id=message.from_user.id,
-                query=query,
-                assessment=result,
-                report=report,
-            )
-            return True, _bulk_result_line(query.value, event_id, result), row_from_assessment(result)
+            try:
+                report = format_assessment(result)
+                event_id = secrets.token_urlsafe(9)
+                if learning_store:
+                    try:
+                        event_id = learning_store.record_check(
+                            actor_id=str(message.from_user.id),
+                            identifier=query,
+                            assessment=result,
+                            rendered_response=report,
+                        )
+                    except Exception:
+                        logging.exception("Не удалось сохранить успешную массовую проверку в журнал обучения")
+                try:
+                    history_store.record_check(
+                        event_id=event_id,
+                        chat_id=message.chat.id,
+                        actor_id=message.from_user.id,
+                        query=query,
+                        assessment=result,
+                        report=report,
+                    )
+                except Exception:
+                    logging.exception("Не удалось сохранить успешную массовую проверку в историю")
+                    return (
+                        True,
+                        f"⚠️ {query.value} — результат получен, но не сохранён в историю",
+                        row_from_assessment(result),
+                    )
+                return True, _bulk_result_line(query.value, event_id, result), row_from_assessment(result)
+            except Exception as exc:  # pragma: no cover - защитный контур формирования результата
+                logging.exception("Ошибка формирования результата массовой проверки %s", query.value)
+                return False, f"❌ {query.value} — внутренняя ошибка формирования результата", row_from_error(query.value, str(exc))
 
     outcomes = await asyncio.gather(*(process(query) for query in queries))
     succeeded = sum(1 for success, _, _ in outcomes if success)
@@ -441,13 +505,17 @@ async def check_all(message: Message) -> None:
     await _answer_chunks(message, lines)
     workbook_rows = [row for _, _, row in outcomes]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    await message.answer_document(
-        BufferedInputFile(
-            build_check_workbook(workbook_rows),
-            filename=f"check_all_{timestamp}.xlsx",
-        ),
-        caption="Результаты массовой проверки в формате Excel.",
-    )
+    try:
+        await message.answer_document(
+            BufferedInputFile(
+                build_check_workbook(workbook_rows),
+                filename=f"check_all_{timestamp}.xlsx",
+            ),
+            caption="Результаты массовой проверки в формате Excel.",
+        )
+    except Exception:
+        logging.exception("Не удалось отправить Excel-отчёт массовой проверки")
+        await message.answer("Текстовая сводка готова, но Excel-файл отправить не удалось.")
 
 
 @router.message(Command("learning_queue"))
@@ -533,11 +601,16 @@ async def revoke_access(message: Message, command: CommandObject) -> None:
     if not _is_root(message) or not message.from_user or access_store is None:
         await message.answer("Команда доступна Главному администратору @Sholomon.")
         return
-    tag, _ = _target_user(message, command)
+    tag, target_id = _target_user(message, command)
     if not tag:
         await message.answer("Формат: /revoke @username или ответьте этой командой на сообщение пользователя.")
         return
-    if access_store.revoke(message.chat.id, username=tag, revoked_by=message.from_user.id):
+    if access_store.revoke(
+        message.chat.id,
+        username=tag,
+        user_id=target_id,
+        revoked_by=message.from_user.id,
+    ):
         await message.answer(f"Доступ пользователя @{tag} отозван в этом чате.")
     else:
         await message.answer("Нельзя отозвать доступ Главного администратора или указан некорректный тег.")
@@ -617,18 +690,27 @@ async def _run() -> None:
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("Не задан BOT_TOKEN в .env")
+    hash_salt = os.getenv("LEARNING_HASH_SALT", "").strip()
+    if not hash_salt:
+        raise RuntimeError(
+            "Не задан LEARNING_HASH_SALT: укажите стабильную случайную соль для защиты идентификаторов."
+        )
     access_store = ChatAccessStore(
         os.getenv("ACCESS_DB_PATH", "data/access.sqlite3"),
     )
-    agent = LegalEntityAgent()
+    fns_client = FnsEgrulClient(
+        base_url=os.getenv("FNS_BASE_URL", "").strip() or "https://egrul.nalog.ru/",
+        timeout=_positive_env_float("FNS_TIMEOUT_SECONDS", 20.0),
+    )
+    agent = LegalEntityAgent(client=fns_client)
     learning_store = LearningStore(
         os.getenv("LEARNING_DB_PATH", "data/learning.sqlite3"),
         store_raw=_env_bool("LEARNING_STORE_RAW_REQUESTS"),
-        hash_salt=os.getenv("LEARNING_HASH_SALT", ""),
+        hash_salt=hash_salt,
     )
     history_store = HistoryStore(
         os.getenv("HISTORY_DB_PATH", "data/history.sqlite3"),
-        hash_salt=os.getenv("LEARNING_HASH_SALT", ""),
+        hash_salt=hash_salt,
     )
     chat_skill = ChatSkill.from_env()
     reaction_settings = ReactionSettings.from_env()
