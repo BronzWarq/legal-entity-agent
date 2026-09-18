@@ -152,6 +152,7 @@ class ChatAccessStore:
         chat_id: int | str,
         *,
         username: str,
+        user_id: int | str | None = None,
         revoked_by: int | str,
     ) -> bool:
         tag = normalize_tag(username)
@@ -159,6 +160,16 @@ class ChatAccessStore:
             return False
         now = self._now()
         with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE chat_access
+                SET status = 'revoked', updated_at = ?, updated_by = ?
+                WHERE chat_id = ? AND (tag = ? OR (user_id IS NOT NULL AND user_id = ?))
+                """,
+                (now, str(revoked_by), str(chat_id), tag, str(user_id) if user_id is not None else None),
+            )
+            if cursor.rowcount:
+                return True
             self._connection.execute(
                 """
                 INSERT INTO chat_access (chat_id, tag, user_id, status, updated_at, updated_by)
