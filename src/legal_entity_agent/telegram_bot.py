@@ -25,16 +25,18 @@ from dotenv import load_dotenv
 
 from .agent import LegalEntityAgent
 from .audit import AuditStore
+from .batch_jobs import BatchJob, BatchJobRegistry, BatchJobState
 from .bulk_import import parse_upload
 from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
 from .deep_check import AtomnoFnsCheckAdapter
 from .excel_export import build_check_workbook, row_from_assessment, row_from_error
-from .fns_client import FnsEgrulClient, FnsError
+from .fns_client import FnsBlockedError, FnsEgrulClient, FnsError
 from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
 from .licenses import LicenseStore, new_license
+from .models import SearchQuery
 from .permissions import ChatAccessStore, is_main_admin, normalize_tag
 from .reactions import ReactionSettings
 from .render import format_assessment
@@ -50,6 +52,8 @@ audit_store: AuditStore | None = None
 watch_store: WatchStore | None = None
 chat_skill: ChatSkill | None = None
 reaction_settings = ReactionSettings()
+batch_jobs = BatchJobRegistry()
+batch_tasks: dict[str, asyncio.Task[None]] = {}
 
 
 def _audit(message: Message, action: str, details: str = "") -> None:
@@ -72,10 +76,13 @@ def _allowed(message: Message) -> bool:
 
 
 def _can_check(message: Message) -> bool:
-    if not message.from_user or not access_store:
+    return bool(message.from_user and _can_check_user(message.chat.id, message.from_user))
+
+
+def _can_check_user(chat_id: int, user) -> bool:
+    if not access_store:
         return False
-    role = access_store.role_for(message.chat.id, user_id=message.from_user.id,
-                                username=message.from_user.username)
+    role = access_store.role_for(chat_id, user_id=user.id, username=user.username)
     return role in {"owner", "manager", "reviewer", "checker"}
 
 
@@ -165,6 +172,9 @@ def help_text() -> str:
         "/watched — показать список компаний для мониторинга.\n"
         "/app — открыть Telegram Mini App (если задан MINI_APP_URL).\n"
         "/check_all (или /check all) — повторно проверить все уникальные юрлица из базы истории (администратор).\n"
+        "/batch_status — показать состояние текущей массовой проверки.\n"
+        "/captcha_done ID — продолжить очередь после ручной CAPTCHA.\n"
+        "/batch_cancel ID — отменить ожидающую массовую проверку.\n"
         "/feedback ID ОЦЕНКА — отправить оценку результата проверки.\n"
         "  Оценки: correct, incorrect или needs_review.\n\n"
         "/chat_reset — очистить память разговорного диалога в текущем чате.\n\n"
@@ -692,6 +702,291 @@ def _bulk_result_line(query: str, event_id: str, result) -> str:
     return f"✅ {title}{details} — {state}; ID проверки: {event_id}"
 
 
+def _captcha_keyboard(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ CAPTCHA пройдена — продолжить",
+                    callback_data=f"batch_captcha_resume:{job_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⏹ Отменить пакет",
+                    callback_data=f"batch_captcha_cancel:{job_id}",
+                )
+            ],
+        ]
+    )
+
+
+def _batch_captcha_url() -> str:
+    value = os.getenv("FNS_PUBLIC_CHECK_URL", "https://pb.nalog.ru/").strip()
+    return value if value.startswith("https://") else "https://pb.nalog.ru/"
+
+
+async def _record_batch_failure(job: BatchJob, query: SearchQuery, error: str) -> None:
+    if learning_store is None:
+        return
+    try:
+        learning_store.record_failure(
+            actor_id=str(job.actor_id),
+            identifier=query,
+            error=error,
+        )
+    except Exception:
+        logging.exception("Не удалось сохранить ошибку пакетной проверки в журнал обучения")
+
+
+async def _record_batch_success(message: Message, job: BatchJob, query: SearchQuery, result) -> tuple[str, str]:
+    report = format_assessment(result)
+    event_id = secrets.token_urlsafe(9)
+    if learning_store:
+        try:
+            event_id = learning_store.record_check(
+                actor_id=str(job.actor_id),
+                identifier=query,
+                assessment=result,
+                rendered_response=report,
+            )
+        except Exception:
+            logging.exception("Не удалось сохранить результат пакетной проверки в журнал обучения")
+    if history_store:
+        try:
+            history_store.record_check(
+                event_id=event_id,
+                chat_id=message.chat.id,
+                actor_id=job.actor_id,
+                query=query,
+                assessment=result,
+                report=report,
+            )
+        except Exception:
+            logging.exception("Не удалось сохранить результат пакетной проверки в историю")
+    return event_id, report
+
+
+async def _run_batch_job(job: BatchJob, message: Message) -> None:
+    """Последовательно выполнить пакет и ждать пользователя на CAPTCHA."""
+
+    rows = []
+    succeeded = 0
+    failed = 0
+    try:
+        while job.index < len(job.queries):
+            query = job.queries[job.index]
+            result = None
+            while job.state is not BatchJobState.CANCELLED:
+                try:
+                    if agent is None:
+                        raise FnsError("агент не настроен")
+                    result = await agent.check(query)
+                except FnsBlockedError:
+                    job.pause_for_captcha(query)
+                    await message.answer(
+                        f"⏸ Массовая проверка приостановлена на компании {job.index + 1}/{len(job.queries)}.\n"
+                        f"Реквизиты: {query.value}\n\n"
+                        f"ФНС запросила CAPTCHA. Откройте официальный сервис, выполните проверку вручную "
+                        f"для этой компании, затем нажмите кнопку ниже.\n"
+                        f"Источник: {_batch_captcha_url()}\n\n"
+                        f"Запрос не считается проверенным, пока ФНС не вернёт результат.",
+                        reply_markup=_captcha_keyboard(job.job_id),
+                    )
+                    await job.wait_for_resume()
+                    continue
+                except FnsError as exc:
+                    failed += 1
+                    error = str(exc)
+                    await _record_batch_failure(job, query, error)
+                    rows.append(row_from_error(query.value, error))
+                    await message.answer(f"❌ {query.value} — {error}")
+                    break
+                except Exception:
+                    logging.exception("Ошибка пакетной проверки %s", query.value)
+                    failed += 1
+                    error = "внутренняя ошибка проверки"
+                    await _record_batch_failure(job, query, error)
+                    rows.append(row_from_error(query.value, error))
+                    await message.answer(f"❌ {query.value} — {error}")
+                    break
+                else:
+                    event_id, _report = await _record_batch_success(message, job, query, result)
+                    succeeded += 1
+                    rows.append(row_from_assessment(result))
+                    await message.answer(_bulk_result_line(query.value, event_id, result))
+                    break
+
+            if job.state is BatchJobState.CANCELLED:
+                break
+            job.index += 1
+
+        if job.state is BatchJobState.CANCELLED:
+            remaining = job.queries[job.index:]
+            rows.extend(
+                row_from_error(query.value, "проверка отменена пользователем")
+                for query in remaining
+            )
+            await message.answer(
+                f"⏹ Пакетная проверка отменена. Обработано: {job.index}/{len(job.queries)}."
+            )
+        else:
+            job.complete()
+            await message.answer(
+                f"✅ Массовая проверка завершена: успешно — {succeeded}, с ошибкой — {failed}."
+            )
+
+        _audit(
+            message,
+            "check_all_completed" if job.source == "history" else "bulk_completed",
+            f"job={job.job_id};success={succeeded};failed={failed};state={job.state.value}",
+        )
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        try:
+            await message.answer_document(
+                BufferedInputFile(
+                    build_check_workbook(rows),
+                    filename=f"batch_check_{timestamp}.xlsx",
+                ),
+                caption="Результаты пакетной проверки в формате Excel (4 столбца).",
+            )
+        except Exception:
+            logging.exception("Не удалось отправить Excel-отчёт пакетной проверки")
+            await message.answer("Текстовая сводка готова, но Excel-файл отправить не удалось.")
+    except asyncio.CancelledError:
+        job.cancel()
+        raise
+    finally:
+        batch_tasks.pop(job.job_id, None)
+        batch_jobs.remove(job.job_id)
+
+
+async def _start_batch_job(message: Message, queries: list[SearchQuery], *, source: str) -> None:
+    if not message.from_user:
+        await message.answer("Не удалось определить пользователя, запустившего пакет.")
+        return
+    try:
+        job = batch_jobs.create(
+            chat_id=message.chat.id,
+            actor_id=message.from_user.id,
+            queries=queries,
+            source=source,
+        )
+    except ValueError:
+        current = batch_jobs.active_for_chat(message.chat.id)
+        suffix = f" ID текущего задания: {current.job_id}" if current else ""
+        await message.answer(f"В этом чате уже выполняется пакетная проверка.{suffix}")
+        return
+    _audit(
+        message,
+        "check_all_started" if source == "history" else "bulk_started",
+        f"job={job.job_id};count={len(queries)}",
+    )
+    await message.answer(
+        f"Запускаю последовательную проверку {len(queries)} компаний. "
+        f"Задание: {job.job_id}. При CAPTCHA очередь остановится и продолжится после вашего подтверждения."
+    )
+    task = asyncio.create_task(_run_batch_job(job, message))
+    batch_tasks[job.job_id] = task
+
+
+def _batch_job_for_message(message: Message, job_id: str = "") -> BatchJob | None:
+    if job_id:
+        job = batch_jobs.get(job_id)
+    else:
+        job = batch_jobs.active_for_chat(message.chat.id)
+    if (
+        job is None
+        or not message.from_user
+        or job.chat_id != message.chat.id
+        or job.actor_id != message.from_user.id
+        or not _can_check_user(message.chat.id, message.from_user)
+    ):
+        return None
+    return job
+
+
+@router.callback_query(F.data.startswith("batch_captcha_resume:"))
+async def batch_captcha_resume(callback: CallbackQuery) -> None:
+    if not callback.message or not callback.from_user:
+        await callback.answer("Не удалось определить чат.", show_alert=True)
+        return
+    job_id = (callback.data or "").split(":", 1)[1]
+    job = batch_jobs.get(job_id)
+    if (
+        job is None
+        or callback.message.chat.id != job.chat_id
+        or callback.from_user.id != job.actor_id
+        or not _can_check_user(callback.message.chat.id, callback.from_user)
+    ):
+        await callback.answer("У вас нет права продолжить это задание.", show_alert=True)
+        return
+    if job.resume_after_captcha():
+        await callback.answer("Очередь возобновлена.")
+        await callback.message.answer(
+            f"▶️ Повторяю проверку компании {job.index + 1}/{len(job.queries)}."
+        )
+    else:
+        await callback.answer("Это задание уже не ожидает CAPTCHA.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("batch_captcha_cancel:"))
+async def batch_captcha_cancel(callback: CallbackQuery) -> None:
+    if not callback.message or not callback.from_user:
+        await callback.answer("Не удалось определить чат.", show_alert=True)
+        return
+    job_id = (callback.data or "").split(":", 1)[1]
+    job = batch_jobs.get(job_id)
+    if (
+        job is None
+        or callback.message.chat.id != job.chat_id
+        or callback.from_user.id != job.actor_id
+        or not _can_check_user(callback.message.chat.id, callback.from_user)
+    ):
+        await callback.answer("У вас нет права отменить это задание.", show_alert=True)
+        return
+    if job.cancel():
+        await callback.answer("Пакет отменён.")
+        await callback.message.answer("⏹ Запрошена отмена пакетной проверки.")
+    else:
+        await callback.answer("Задание уже завершено.", show_alert=True)
+
+
+@router.message(Command("batch_status"))
+async def batch_status(message: Message, command: CommandObject) -> None:
+    job = _batch_job_for_message(message, (command.args or "").strip())
+    if job is None:
+        await message.answer("Активной пакетной проверки в этом чате нет.")
+        return
+    current = job.current_query.value if job.current_query else "—"
+    await message.answer(
+        f"Задание {job.job_id}: {job.state.value}; "
+        f"обработано {job.index}/{len(job.queries)}; текущий запрос: {current}."
+    )
+
+
+@router.message(Command("captcha_done"))
+async def captcha_done(message: Message, command: CommandObject) -> None:
+    job = _batch_job_for_message(message, (command.args or "").strip())
+    if job is None:
+        await message.answer("Активной пакетной проверки, ожидающей CAPTCHA, нет.")
+        return
+    if job.resume_after_captcha():
+        await message.answer("▶️ CAPTCHA отмечена как пройденная. Очередь продолжена.")
+    else:
+        await message.answer("Задание сейчас не ожидает CAPTCHA.")
+
+
+@router.message(Command("batch_cancel"))
+async def batch_cancel(message: Message, command: CommandObject) -> None:
+    job = _batch_job_for_message(message, (command.args or "").strip())
+    if job is None:
+        await message.answer("Активной пакетной проверки в этом чате нет.")
+        return
+    job.cancel()
+    await message.answer("⏹ Запрошена отмена пакетной проверки.")
+
+
 @router.message(Command("check_all", "checkall"))
 async def check_all(message: Message) -> None:
     """Повторно проверяет все уникальные организации, сохранённые в истории."""
@@ -708,95 +1003,8 @@ async def check_all(message: Message) -> None:
         await message.answer("В базе истории нет сохранённых юридических лиц для проверки.")
         return
 
-    concurrency = _positive_env_int("CHECK_ALL_CONCURRENCY", 3)
-    await message.answer(
-        f"Запускаю повторную проверку {len(queries)} уникальных юридических лиц. "
-        f"Одновременно выполняется до {concurrency} запросов."
-    )
-    _audit(message, "check_all_started", f"count={len(queries)}")
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def process(query):
-        async with semaphore:
-            try:
-                result = await agent.check(query)
-            except FnsError as exc:
-                if learning_store:
-                    try:
-                        learning_store.record_failure(
-                            actor_id=str(message.from_user.id), identifier=query, error=str(exc)
-                        )
-                    except Exception:
-                        logging.exception("Не удалось сохранить ошибку массовой проверки в журнал обучения")
-                return False, f"❌ {query.value} — {exc}", row_from_error(query.value, str(exc))
-            except Exception:  # pragma: no cover - защитный контур для массовой операции
-                logging.exception("Ошибка массовой проверки запроса %s", query.value)
-                if learning_store:
-                    try:
-                        learning_store.record_failure(
-                            actor_id=str(message.from_user.id), identifier=query, error="internal error"
-                        )
-                    except Exception:
-                        logging.exception("Не удалось сохранить внутреннюю ошибку в журнал обучения")
-                return False, f"❌ {query.value} — внутренняя ошибка проверки", row_from_error(query.value, "внутренняя ошибка проверки")
-
-            try:
-                report = format_assessment(result)
-                event_id = secrets.token_urlsafe(9)
-                if learning_store:
-                    try:
-                        event_id = learning_store.record_check(
-                            actor_id=str(message.from_user.id),
-                            identifier=query,
-                            assessment=result,
-                            rendered_response=report,
-                        )
-                    except Exception:
-                        logging.exception("Не удалось сохранить успешную массовую проверку в журнал обучения")
-                try:
-                    history_store.record_check(
-                        event_id=event_id,
-                        chat_id=message.chat.id,
-                        actor_id=message.from_user.id,
-                        query=query,
-                        assessment=result,
-                        report=report,
-                    )
-                except Exception:
-                    logging.exception("Не удалось сохранить успешную массовую проверку в историю")
-                    return (
-                        True,
-                        f"⚠️ {query.value} — результат получен, но не сохранён в историю",
-                        row_from_assessment(result),
-                    )
-                return True, _bulk_result_line(query.value, event_id, result), row_from_assessment(result)
-            except Exception as exc:  # pragma: no cover - защитный контур формирования результата
-                logging.exception("Ошибка формирования результата массовой проверки %s", query.value)
-                return False, f"❌ {query.value} — внутренняя ошибка формирования результата", row_from_error(query.value, str(exc))
-
-    outcomes = await asyncio.gather(*(process(query) for query in queries))
-    succeeded = sum(1 for success, _, _ in outcomes if success)
-    failed = len(outcomes) - succeeded
-    lines = [
-        f"Массовая проверка завершена: успешно — {succeeded}, с ошибкой — {failed}.",
-        "Результаты сохранены в историю текущего чата:",
-    ]
-    lines.extend(line for _, line, _ in outcomes)
-    await _answer_chunks(message, lines)
-    _audit(message, "check_all_completed", f"success={succeeded};failed={failed}")
-    workbook_rows = [row for _, _, row in outcomes]
-    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    try:
-        await message.answer_document(
-            BufferedInputFile(
-                build_check_workbook(workbook_rows),
-                filename=f"check_all_{timestamp}.xlsx",
-            ),
-            caption="Результаты массовой проверки в формате Excel.",
-        )
-    except Exception:
-        logging.exception("Не удалось отправить Excel-отчёт массовой проверки")
-        await message.answer("Текстовая сводка готова, но Excel-файл отправить не удалось.")
+    await _start_batch_job(message, queries, source="history")
+    return
 
 
 @router.message(F.document)
@@ -835,39 +1043,8 @@ async def bulk_document(message: Message, bot: Bot) -> None:
             seen.add(key)
             unique.append(query)
     queries = unique
-    rows = []
-    lines = [f"Начинаю массовую проверку: {len(queries)} уникальных строк."]
-    semaphore = asyncio.Semaphore(_positive_env_int("BULK_CONCURRENCY", 3))
-
-    async def process(query):
-        async with semaphore:
-            try:
-                result = await agent.check(query)
-                report = format_assessment(result)
-                event_id = secrets.token_urlsafe(9)
-                if history_store and message.from_user:
-                    history_store.record_check(event_id=event_id, chat_id=message.chat.id,
-                                               actor_id=message.from_user.id, query=query,
-                                               assessment=result, report=report)
-                return True, _bulk_result_line(query.value, event_id, result), row_from_assessment(result)
-            except Exception as exc:
-                logging.exception("Ошибка массовой проверки %s", query.value)
-                return False, f"❌ {query.value} — проверка не выполнена", row_from_error(query.value, str(exc))
-
-    completed = 0
-    for task in asyncio.as_completed([process(query) for query in queries]):
-        _success, line, row = await task
-        completed += 1
-        rows.append(row)
-        lines.append(line)
-        if completed % 10 == 0 or completed == len(queries):
-            await message.answer(f"Массовая проверка: {completed}/{len(queries)} обработано.")
-    await _answer_chunks(message, lines)
-    try:
-        await message.answer_document(BufferedInputFile(build_check_workbook(rows), filename="bulk_check.xlsx"),
-                                      caption="Результаты массовой проверки в формате Excel.")
-    except Exception:
-        logging.exception("Не удалось отправить массовый Excel-отчёт")
+    await _start_batch_job(message, queries, source="upload")
+    return
 
 
 @router.message(F.web_app_data)
