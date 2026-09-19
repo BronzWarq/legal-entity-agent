@@ -1234,16 +1234,25 @@ async def mini_app_data(message: Message) -> None:
             f"обработано {job.index}/{len(job.queries)}; текущий запрос: {current}."
         )
         return
-    if action not in {"check", "watch"} or not isinstance(payload.get("query"), str):
+    if action not in {"check", "watch", "unwatch"} or not isinstance(payload.get("query"), str):
         await message.answer("Неизвестное действие Mini App.")
         return
-    if payload["action"] == "watch":
+    if payload["action"] in {"watch", "unwatch"}:
         if not _allowed(message) or not message.from_user or watch_store is None:
             await message.answer("У вас нет разрешения на мониторинг компаний.")
             return
-        watch_store.add(message.chat.id, payload["query"], message.from_user.id)
-        _audit(message, "watch_added", "company_added_from_mini_app")
-        await message.answer("Компания добавлена в мониторинг.")
+        if payload["action"] == "watch":
+            watch_store.add(message.chat.id, payload["query"], message.from_user.id)
+            _audit(message, "watch_added", "company_added_from_mini_app")
+            await message.answer("Компания добавлена в мониторинг.")
+        else:
+            removed = watch_store.remove(message.chat.id, payload["query"])
+            if removed:
+                _audit(message, "watch_removed", "company_removed_from_mini_app")
+            await message.answer(
+                "Компания удалена из мониторинга." if removed
+                else "Компания не найдена в мониторинге."
+            )
         return
     await _run_check(message, payload["query"])
 
@@ -1660,4 +1669,3 @@ async def _run() -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     asyncio.run(_run())
-
