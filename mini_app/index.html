@@ -39,6 +39,10 @@
     .captcha-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .captcha-actions button { margin: 0; }
     .captcha-actions button:last-child { grid-column: 1 / -1; }
+    .fns-frame-wrap { display: none; margin-top: 12px; overflow: hidden; border: 1px solid rgba(23,105,209,.22); border-radius: 14px; background: #fff; }
+    .fns-frame-wrap.visible { display: block; }
+    .fns-frame { width: 100%; height: min(62vh, 620px); display: block; border: 0; background: #fff; }
+    .frame-note { margin: 8px 0 0; font-size: .78em; color: var(--muted); line-height: 1.35; }
   </style>
 </head>
 <body>
@@ -64,6 +68,17 @@
       <button id="batchStatus" class="secondary">Обновить статус</button>
       <button id="captchaDone">Подтвердить CAPTCHA</button>
       <button id="batchCancel" class="danger">Отменить очередь</button>
+    </div>
+    <button id="openFns" class="secondary">Открыть веб‑версию ФНС здесь</button>
+    <div id="fnsFrameWrap" class="fns-frame-wrap">
+      <iframe
+        id="fnsFrame"
+        class="fns-frame"
+        title="Официальная веб-версия ФНС"
+        src="https://pb.nalog.ru/"
+        loading="lazy"
+        referrerpolicy="no-referrer"></iframe>
+      <p class="frame-note">CAPTCHA вводится вручную на официальной странице ФНС. Mini App не получает и не передаёт CAPTCHA‑токены.</p>
     </div>
   </section>
   <section class="panel">
@@ -118,6 +133,13 @@
     document.querySelector('#batchStatus').onclick = () => send('batch_status', batchValue());
     document.querySelector('#captchaDone').onclick = () => send('captcha_done', batchValue());
     document.querySelector('#batchCancel').onclick = () => send('batch_cancel', batchValue());
+    document.querySelector('#openFns').onclick = () => {
+      const frame = document.querySelector('#fnsFrameWrap');
+      frame.classList.toggle('visible');
+      document.querySelector('#openFns').textContent = frame.classList.contains('visible')
+        ? 'Скрыть веб‑версию ФНС'
+        : 'Открыть веб‑версию ФНС здесь';
+    };
     render();
   </script>
 </body>
