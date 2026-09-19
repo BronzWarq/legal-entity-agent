@@ -5,7 +5,7 @@ import logging
 import os
 import secrets
 from datetime import UTC, datetime
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -71,6 +71,27 @@ def _mini_app_url() -> str:
     """Возвращает безопасный адрес Mini App, опубликованный по HTTPS."""
     url = os.getenv("MINI_APP_URL", "").strip()
     return url if url.startswith("https://") else ""
+
+
+def _mini_app_link(*, job_id: str | None = None) -> str:
+    """Возвращает ссылку Mini App с непрозрачным ID задания, если он задан."""
+
+    url = _mini_app_url()
+    if not url or not job_id:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}job_id={quote(job_id, safe='')}"
+
+
+def _mini_app_keyboard(*, job_id: str | None = None) -> InlineKeyboardMarkup | None:
+    url = _mini_app_link(job_id=job_id)
+    if not url:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть Mini App", web_app=WebAppInfo(url=url))]
+        ]
+    )
 
 
 def _allowed(message: Message) -> bool:
@@ -306,6 +327,12 @@ async def _run_check(message: Message, raw_query: str) -> None:
     if agent is None:
         await message.answer("Проверка сейчас недоступна: агент не настроен.")
         return
+    mini_app_keyboard = _mini_app_keyboard()
+    if mini_app_keyboard:
+        await message.answer(
+            "Для проверки и дальнейшего управления результатом можно открыть Mini App:",
+            reply_markup=mini_app_keyboard,
+        )
     query = None
     try:
         query = parse_search_query(raw_query)
@@ -948,7 +975,8 @@ async def _start_batch_job(message: Message, queries: list[SearchQuery], *, sour
     )
     await message.answer(
         f"Запускаю последовательную проверку {len(queries)} компаний. "
-        f"Задание: {job.job_id}. При CAPTCHA очередь остановится и продолжится после вашего подтверждения."
+        f"Задание: {job.job_id}. При CAPTCHA очередь остановится и продолжится после вашего подтверждения.",
+        reply_markup=_mini_app_keyboard(job_id=job.job_id),
     )
     task = asyncio.create_task(_run_batch_job(job, message))
     batch_tasks[job.job_id] = task
