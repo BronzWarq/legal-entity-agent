@@ -14,6 +14,10 @@ class FnsError(RuntimeError):
     """Ошибка получения или разбора ответа сервиса ФНС."""
 
 
+class FnsTransientError(FnsError):
+    """Временная сетевая ошибка, для которой допустим повтор с паузой."""
+
+
 class FnsBlockedError(FnsError):
     """Сервис запросил CAPTCHA или заблокировал автоматический запрос."""
 
@@ -62,7 +66,7 @@ class FnsEgrulClient:
                 search = await client.post("", data={"query": query.value})
                 search.raise_for_status()
             except httpx.HTTPError as exc:
-                raise FnsError(f"Не удалось выполнить запрос к ФНС: {exc}") from exc
+                raise FnsTransientError(f"Не удалось выполнить запрос к ФНС: {exc}") from exc
 
             search_payload = self._json_or_blocked(search)
             token = search_payload.get("t") or search_payload.get("token")
@@ -75,7 +79,7 @@ class FnsEgrulClient:
                 result = await client.get(f"search-result/{token}")
                 result.raise_for_status()
             except httpx.HTTPError as exc:
-                raise FnsError(f"Не удалось получить результат поиска ФНС: {exc}") from exc
+                raise FnsTransientError(f"Не удалось получить результат поиска ФНС: {exc}") from exc
 
             payload = self._json_or_blocked(result)
             rows = payload.get("rows") if isinstance(payload, dict) else None
