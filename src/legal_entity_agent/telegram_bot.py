@@ -38,7 +38,7 @@ from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
 from .licenses import LicenseStore, new_license
 from .models import SearchQuery
-from .notifications import EmailSubscriptionStore, SmtpConfig, normalize_email, send_email
+from .notifications import FIXED_NOTIFICATION_EMAIL, EmailSubscriptionStore, SmtpConfig, send_email
 from .permissions import ChatAccessStore, is_main_admin, normalize_tag
 from .reactions import ReactionSettings
 from .render import format_assessment
@@ -1188,22 +1188,15 @@ async def mini_app_data(message: Message) -> None:
                 "Email-уведомления отключены." if removed else "Для этого чата email-уведомления не были настроены."
             )
             return
-        raw_email = payload.get("email")
-        if not isinstance(raw_email, str):
-            await message.answer("Укажите адрес электронной почты в Mini App.")
-            return
-        try:
-            email = normalize_email(raw_email)
-        except ValueError as exc:
-            await message.answer(str(exc))
-            return
-        notification_store.set(message.chat.id, email, message.from_user.id)
+        notification_store.set(message.chat.id, FIXED_NOTIFICATION_EMAIL, message.from_user.id)
         _audit(message, "email_notifications_enabled", "email_saved")
         if smtp_config.configured:
-            await message.answer(f"Email {email} сохранён. Уведомления будут отправляться при появлении отметки ФНС.")
+            await message.answer(
+                f"Уведомления включены. Письма будут отправляться на {FIXED_NOTIFICATION_EMAIL}."
+            )
         else:
             await message.answer(
-                f"Email {email} сохранён, но отправка пока не настроена на сервере. "
+                f"Уведомления включены для адреса {FIXED_NOTIFICATION_EMAIL}, но отправка пока не настроена на сервере. "
                 "Администратору нужно задать SMTP_HOST и SMTP_FROM."
             )
         return
@@ -1477,7 +1470,7 @@ async def _monitor_loop(bot: Bot, interval_seconds: int) -> None:
                         if previous_state is None:
                             notification_store.mark_alert_state(chat_id, raw_query, "present")
                             continue
-                        recipient = notification_store.get(chat_id)
+                        recipient = FIXED_NOTIFICATION_EMAIL if notification_store.get(chat_id) else None
                         alert_state = notification_store.alert_state(chat_id, raw_query)
                         if recipient and alert_state != "present":
                             if not smtp_config.configured:
