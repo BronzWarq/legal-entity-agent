@@ -28,6 +28,10 @@
     button.danger { background: linear-gradient(100deg, #c94356, #e16a6a); box-shadow: 0 4px 10px rgba(190,54,75,.2); }
     button.compact { width: auto; min-width: 70px; padding: 8px 10px; margin: 0 0 0 4px; border-radius: 10px; font-size: .82em; }
     .muted { color: var(--muted); font-size: .86em; }
+    .button-help { margin: -2px 2px 9px; color: var(--muted); font-size: .76em; line-height: 1.35; }
+    .email-actions .button-help { grid-column: 1 / -1; margin-top: -2px; }
+    .button-block { margin-bottom: 8px; }
+    .button-block:last-child { margin-bottom: 0; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: .86em; }
     th, td { text-align: left; padding: 9px 4px; border-bottom: 1px solid rgba(111,127,149,.22); }
     th { color: var(--muted); font-weight: 600; }
@@ -37,8 +41,8 @@
     .captcha-status { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0 12px; }
     .captcha-icon { font-size: 1.35rem; line-height: 1; }
     .captcha-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .captcha-actions button { margin: 0; }
-    .captcha-actions button:last-child { grid-column: 1 / -1; }
+    .captcha-actions .button-block button { margin: 0; }
+    .captcha-actions .button-block:last-child { grid-column: 1 / -1; }
     .fns-frame-wrap { display: none; margin-top: 12px; overflow: hidden; border: 1px solid rgba(23,105,209,.22); border-radius: 14px; background: #fff; }
     .fns-frame-wrap.visible { display: block; }
     .fns-frame { width: 100%; height: min(62vh, 620px); display: block; border: 0; background: #fff; }
@@ -63,15 +67,27 @@
     <label class="label" for="notificationEmail">Адрес электронной почты</label>
     <input id="notificationEmail" class="email-input" type="email" placeholder="name@example.ru" autocomplete="email" required>
     <div class="email-actions">
-      <button id="saveEmail">Включить уведомления</button>
-      <button id="removeEmail" class="secondary">Отключить уведомления</button>
+      <div class="button-block">
+        <button id="saveEmail">Включить уведомления</button>
+        <p class="button-help">Сохранить адрес и получать письма о новых отметках ФНС.</p>
+      </div>
+      <div class="button-block">
+        <button id="removeEmail" class="secondary">Отключить уведомления</button>
+        <p class="button-help">Остановить отправку писем для этого чата.</p>
+      </div>
     </div>
   </section>
   <section class="panel">
     <label class="label" for="query">Реквизиты или описание компании</label>
     <input id="query" placeholder="ИНН, ОГРН, КПП или название">
-    <button id="check">Проверить компанию</button>
-    <button id="add" class="secondary">Добавить в мониторинг</button>
+    <div class="button-block">
+      <button id="check">Проверить компанию</button>
+      <p class="button-help">Запустить разовую проверку введённых реквизитов.</p>
+    </div>
+    <div class="button-block">
+      <button id="add" class="secondary">Добавить в мониторинг</button>
+      <p class="button-help">Сохранить компанию для будущих автоматических проверок.</p>
+    </div>
   </section>
   <section class="panel captcha-card">
     <strong>Пакетная проверка и CAPTCHA</strong>
@@ -82,11 +98,23 @@
     <label class="label" for="batchId">ID пакетного задания</label>
     <input id="batchId" placeholder="Например, aBc123..." autocomplete="off">
     <div class="captcha-actions">
-      <button id="batchStatus" class="secondary">Обновить статус</button>
-      <button id="captchaDone">Подтвердить CAPTCHA</button>
-      <button id="batchCancel" class="danger">Отменить очередь</button>
+      <div class="button-block">
+        <button id="batchStatus" class="secondary">Обновить статус</button>
+        <p class="button-help">Показать текущую компанию и состояние очереди.</p>
+      </div>
+      <div class="button-block">
+        <button id="captchaDone">Подтвердить CAPTCHA</button>
+        <p class="button-help">Сообщить боту, что CAPTCHA пройдена вручную.</p>
+      </div>
+      <div class="button-block">
+        <button id="batchCancel" class="danger">Отменить очередь</button>
+        <p class="button-help">Остановить пакетную проверку и очистить ожидание.</p>
+      </div>
     </div>
-    <button id="openFns" class="secondary">Открыть веб‑версию ФНС здесь</button>
+    <div class="button-block">
+      <button id="openFns" class="secondary">Открыть веб‑версию ФНС здесь</button>
+      <p class="button-help">Открыть официальную страницу ФНС для ручного ввода CAPTCHA.</p>
+    </div>
     <div id="fnsFrameWrap" class="fns-frame-wrap">
       <iframe
         id="fnsFrame"
@@ -127,8 +155,10 @@
         tr.append(name, state);
         const td = document.createElement('td');
         const check = document.createElement('button'); check.textContent = 'Проверить'; check.className = 'compact';
+        check.title = `Проверить компанию: ${row.query}`;
+        check.setAttribute('aria-label', `Проверить компанию ${row.query}`);
         check.onclick = () => send('check', row.query);
-        const remove = document.createElement('button'); remove.textContent = '×'; remove.setAttribute('aria-label', 'Удалить из списка'); remove.className = 'compact danger';
+        const remove = document.createElement('button'); remove.textContent = '×'; remove.setAttribute('aria-label', `Удалить компанию ${row.query} из мониторинга`); remove.title = `Удалить компанию ${row.query} из мониторинга`; remove.className = 'compact danger';
         remove.onclick = () => { rows.splice(index, 1); render(); };
         td.append(check, remove); tr.appendChild(td); body.appendChild(tr);
       });
@@ -175,3 +205,4 @@
   </script>
 </body>
 </html>
+
