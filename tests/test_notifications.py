@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from legal_entity_agent.notifications import (
+    FIXED_NOTIFICATION_EMAIL,
     EmailSubscriptionStore,
     SmtpConfig,
     normalize_email,
@@ -35,6 +36,10 @@ def test_email_subscription_store_and_alert_state() -> None:
     assert store.remove(1) is True
     assert store.remove(1) is False
     store.close()
+
+
+def test_fixed_notification_email() -> None:
+    assert FIXED_NOTIFICATION_EMAIL == "jurist@wrf.su"
 
 
 def test_send_email_uses_starttls_and_login(monkeypatch) -> None:
@@ -73,4 +78,3 @@ def test_send_email_uses_starttls_and_login(monkeypatch) -> None:
     assert calls[4] == ("login", "user", "secret")
     assert calls[5]["To"] == "to@example.com"
     assert calls[5].get_content().strip() == "Body"
-
