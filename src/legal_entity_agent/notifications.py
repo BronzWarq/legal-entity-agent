@@ -10,7 +10,6 @@ from email.message import EmailMessage
 from pathlib import Path
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-FIXED_NOTIFICATION_EMAIL = "jurist@wrf.su"
 
 
 def normalize_email(value: str) -> str:
