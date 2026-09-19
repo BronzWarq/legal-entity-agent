@@ -29,7 +29,7 @@ from .models import (
     InaccuracyState,
     SearchQuery,
 )
-from .notifications import FIXED_NOTIFICATION_EMAIL, EmailSubscriptionStore, SmtpConfig, normalize_email, send_email
+from .notifications import EmailSubscriptionStore, SmtpConfig, normalize_email, send_email
 from .permissions import ChatAccessStore, TrustedUser, is_main_admin
 from .reactions import STANDARD_TELEGRAM_REACTIONS, ReactionSettings
 from .watchlist import WatchStore
@@ -64,7 +64,6 @@ __all__ = [
     "NaturalIntent",
     "NaturalRequest",
     "EmailSubscriptionStore",
-    "FIXED_NOTIFICATION_EMAIL",
     "SmtpConfig",
     "ReactionSettings",
     "SearchQuery",
