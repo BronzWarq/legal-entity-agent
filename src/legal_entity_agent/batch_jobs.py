@@ -35,6 +35,7 @@ class BatchJob:
     index: int = 0
     state: BatchJobState = BatchJobState.RUNNING
     captcha_query: SearchQuery | None = None
+    captcha_review_id: str | None = None
     _resume_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
@@ -43,10 +44,11 @@ class BatchJob:
             return self.queries[self.index]
         return None
 
-    def pause_for_captcha(self, query: SearchQuery) -> None:
+    def pause_for_captcha(self, query: SearchQuery, review_id: str | None = None) -> None:
         """Перевести задание в ожидание ручного прохождения CAPTCHA."""
 
         self.captcha_query = query
+        self.captcha_review_id = review_id
         self.state = BatchJobState.WAITING_CAPTCHA
         self._resume_event.clear()
 
@@ -60,10 +62,15 @@ class BatchJob:
 
         if self.state is not BatchJobState.WAITING_CAPTCHA:
             return False
-        self.captcha_query = None
         self.state = BatchJobState.RUNNING
         self._resume_event.set()
         return True
+
+    def clear_captcha_review(self) -> str | None:
+        review_id = self.captcha_review_id
+        self.captcha_query = None
+        self.captcha_review_id = None
+        return review_id
 
     def cancel(self) -> bool:
         """Отменить ожидающую или выполняющуюся очередь."""
@@ -76,7 +83,7 @@ class BatchJob:
 
     def complete(self) -> None:
         self.state = BatchJobState.COMPLETED
-        self.captcha_query = None
+        self.clear_captcha_review()
         self._resume_event.set()
 
 
