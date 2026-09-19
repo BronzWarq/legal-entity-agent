@@ -1143,7 +1143,33 @@ async def mini_app_data(message: Message) -> None:
     except (TypeError, ValueError):
         await message.answer("Mini App передал некорректные данные.")
         return
-    if payload.get("action") not in {"check", "watch"} or not isinstance(payload.get("query"), str):
+    action = payload.get("action")
+    if action in {"captcha_done", "batch_cancel", "batch_status"}:
+        if not message.from_user or not _can_check(message):
+            await message.answer("У вас нет разрешения управлять пакетной проверкой.")
+            return
+        job_id = payload.get("job_id") if isinstance(payload.get("job_id"), str) else ""
+        job = _batch_job_for_message(message, job_id)
+        if job is None:
+            await message.answer("Активной пакетной проверки с таким ID в этом чате нет.")
+            return
+        if action == "captcha_done":
+            if job.resume_after_captcha():
+                await message.answer("▶️ CAPTCHA отмечена. Повторяю текущую компанию и продолжаю очередь.")
+            else:
+                await message.answer("Задание сейчас не ожидает CAPTCHA.")
+            return
+        if action == "batch_cancel":
+            job.cancel()
+            await message.answer("⏹ Запрошена отмена пакетной проверки.")
+            return
+        current = job.current_query.value if job.current_query else "—"
+        await message.answer(
+            f"Задание {job.job_id}: {job.state.value}; "
+            f"обработано {job.index}/{len(job.queries)}; текущий запрос: {current}."
+        )
+        return
+    if action not in {"check", "watch"} or not isinstance(payload.get("query"), str):
         await message.answer("Неизвестное действие Mini App.")
         return
     if payload["action"] == "watch":
