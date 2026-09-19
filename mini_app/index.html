@@ -44,6 +44,7 @@
     .fns-frame { width: 100%; height: min(62vh, 620px); display: block; border: 0; background: #fff; }
     .frame-note { margin: 8px 0 0; font-size: .78em; color: var(--muted); line-height: 1.35; }
     .email-card { border: 1px solid rgba(23,105,209,.2); background: linear-gradient(135deg, rgba(23,105,209,.06), rgba(53,198,232,.1)); }
+    .email-input { margin-top: 4px; }
     .email-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .email-actions button { margin: 0; }
     .app-footer { margin: 18px 4px 2px; text-align: center; color: var(--muted); font-size: .8em; line-height: 1.4; }
@@ -58,8 +59,9 @@
   </section>
   <section class="panel email-card">
     <strong>Email-уведомления</strong>
-    <p class="muted">Письма о появлении отметки о недостоверности будут отправляться на фиксированный рабочий адрес:</p>
-    <p><strong>jurist@wrf.su</strong></p>
+    <p class="muted">Укажите адрес, на который будут отправляться письма о появлении отметки о недостоверности.</p>
+    <label class="label" for="notificationEmail">Адрес электронной почты</label>
+    <input id="notificationEmail" class="email-input" type="email" placeholder="name@example.ru" autocomplete="email" required>
     <div class="email-actions">
       <button id="saveEmail">Включить уведомления</button>
       <button id="removeEmail" class="secondary">Отключить уведомления</button>
@@ -155,7 +157,12 @@
     document.querySelector('#batchStatus').onclick = () => send('batch_status', batchValue());
     document.querySelector('#captchaDone').onclick = () => send('captcha_done', batchValue());
     document.querySelector('#batchCancel').onclick = () => send('batch_cancel', batchValue());
-    document.querySelector('#saveEmail').onclick = () => send('set_email', 'enable');
+    document.querySelector('#saveEmail').onclick = () => {
+      const input = document.querySelector('#notificationEmail');
+      const email = input.value.trim();
+      if (!input.checkValidity()) { input.reportValidity(); return; }
+      send('set_email', email);
+    };
     document.querySelector('#removeEmail').onclick = () => send('remove_email', 'remove');
     document.querySelector('#openFns').onclick = () => {
       const frame = document.querySelector('#fnsFrameWrap');
