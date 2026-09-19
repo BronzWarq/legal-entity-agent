@@ -26,12 +26,13 @@ from dotenv import load_dotenv
 from .agent import LegalEntityAgent
 from .audit import AuditStore
 from .batch_jobs import BatchJob, BatchJobRegistry, BatchJobState
+from .batch_review import BatchReviewStore
 from .bulk_import import parse_upload
 from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
 from .deep_check import AtomnoFnsCheckAdapter
 from .excel_export import build_check_workbook, row_from_assessment, row_from_error
-from .fns_client import FnsBlockedError, FnsEgrulClient, FnsError
+from .fns_client import FnsBlockedError, FnsEgrulClient, FnsError, FnsNotFoundError, FnsTransientError
 from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
@@ -50,6 +51,7 @@ history_store: HistoryStore | None = None
 license_store: LicenseStore | None = None
 audit_store: AuditStore | None = None
 watch_store: WatchStore | None = None
+batch_review_store: BatchReviewStore | None = None
 chat_skill: ChatSkill | None = None
 reaction_settings = ReactionSettings()
 batch_jobs = BatchJobRegistry()
@@ -175,6 +177,7 @@ def help_text() -> str:
         "/batch_status — показать состояние текущей массовой проверки.\n"
         "/captcha_done ID — продолжить очередь после ручной CAPTCHA.\n"
         "/batch_cancel ID — отменить ожидающую массовую проверку.\n"
+        "/batch_pending — список компаний, которые требуют ручной проверки или повтора.\n"
         "/feedback ID ОЦЕНКА — отправить оценку результата проверки.\n"
         "  Оценки: correct, incorrect или needs_review.\n\n"
         "/chat_reset — очистить память разговорного диалога в текущем чате.\n\n"
@@ -739,6 +742,35 @@ async def _record_batch_failure(job: BatchJob, query: SearchQuery, error: str) -
         logging.exception("Не удалось сохранить ошибку пакетной проверки в журнал обучения")
 
 
+def _batch_review_id(job: BatchJob) -> str:
+    return f"{job.job_id}:{job.index}"
+
+
+def _record_batch_pending(job: BatchJob, query: SearchQuery, reason: str) -> str:
+    review_id = _batch_review_id(job)
+    if batch_review_store:
+        try:
+            batch_review_store.record_pending(
+                review_id=review_id,
+                chat_id=job.chat_id,
+                actor_id=job.actor_id,
+                query_text=query.value,
+                reason=reason,
+                source=job.source,
+            )
+        except Exception:
+            logging.exception("Не удалось сохранить компанию для ручной проверки")
+    return review_id
+
+
+def _resolve_batch_review(job: BatchJob, review_id: str | None = None) -> None:
+    if batch_review_store:
+        try:
+            batch_review_store.resolve(review_id or _batch_review_id(job))
+        except Exception:
+            logging.exception("Не удалось закрыть запись ручной проверки")
+
+
 async def _record_batch_success(message: Message, job: BatchJob, query: SearchQuery, result) -> tuple[str, str]:
     report = format_assessment(result)
     event_id = secrets.token_urlsafe(9)
@@ -777,13 +809,15 @@ async def _run_batch_job(job: BatchJob, message: Message) -> None:
         while job.index < len(job.queries):
             query = job.queries[job.index]
             result = None
+            attempt = 0
             while job.state is not BatchJobState.CANCELLED:
                 try:
                     if agent is None:
                         raise FnsError("агент не настроен")
                     result = await agent.check(query)
                 except FnsBlockedError:
-                    job.pause_for_captcha(query)
+                    review_id = _record_batch_pending(job, query, "требуется ручная проверка CAPTCHA")
+                    job.pause_for_captcha(query, review_id)
                     await message.answer(
                         f"⏸ Массовая проверка приостановлена на компании {job.index + 1}/{len(job.queries)}.\n"
                         f"Реквизиты: {query.value}\n\n"
@@ -794,23 +828,53 @@ async def _run_batch_job(job: BatchJob, message: Message) -> None:
                         reply_markup=_captcha_keyboard(job.job_id),
                     )
                     await job.wait_for_resume()
+                    attempt = 0
                     continue
-                except FnsError as exc:
+                except FnsTransientError as exc:
+                    retries = _positive_env_int("BATCH_RETRY_ATTEMPTS", 2)
+                    if attempt < retries:
+                        delay = _positive_env_float("BATCH_RETRY_DELAY_SECONDS", 3.0) * (2**attempt)
+                        attempt += 1
+                        await message.answer(
+                            f"⏳ Временная ошибка ФНС для {query.value}. Повтор через {delay:g} с "
+                            f"({attempt}/{retries})."
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    failed += 1
+                    error = str(exc)
+                    _record_batch_pending(job, query, f"не проверено после повторов: {error}")
+                    await _record_batch_failure(job, query, error)
+                    rows.append(row_from_error(query.value, f"требуется ручная проверка: {error}"))
+                    await message.answer(f"❌ {query.value} — {error}")
+                    break
+                except FnsNotFoundError as exc:
                     failed += 1
                     error = str(exc)
                     await _record_batch_failure(job, query, error)
                     rows.append(row_from_error(query.value, error))
                     await message.answer(f"❌ {query.value} — {error}")
                     break
+                except FnsError as exc:
+                    failed += 1
+                    error = str(exc)
+                    _record_batch_pending(job, query, f"требуется ручная проверка: {error}")
+                    await _record_batch_failure(job, query, error)
+                    rows.append(row_from_error(query.value, f"требуется ручная проверка: {error}"))
+                    await message.answer(f"❌ {query.value} — {error}")
+                    break
                 except Exception:
                     logging.exception("Ошибка пакетной проверки %s", query.value)
                     failed += 1
                     error = "внутренняя ошибка проверки"
+                    _record_batch_pending(job, query, error)
                     await _record_batch_failure(job, query, error)
                     rows.append(row_from_error(query.value, error))
                     await message.answer(f"❌ {query.value} — {error}")
                     break
                 else:
+                    _resolve_batch_review(job, job.captcha_review_id)
+                    job.clear_captcha_review()
                     event_id, _report = await _record_batch_success(message, job, query, result)
                     succeeded += 1
                     rows.append(row_from_assessment(result))
@@ -985,6 +1049,29 @@ async def batch_cancel(message: Message, command: CommandObject) -> None:
         return
     job.cancel()
     await message.answer("⏹ Запрошена отмена пакетной проверки.")
+
+
+@router.message(Command("batch_pending"))
+async def batch_pending(message: Message, command: CommandObject) -> None:
+    if not message.from_user or not _can_check(message) or batch_review_store is None:
+        await message.answer("У вас нет разрешения на просмотр ручных проверок.")
+        return
+    try:
+        limit = max(1, min(int((command.args or "20").strip()), 100))
+    except ValueError:
+        limit = 20
+    entries = batch_review_store.list_pending(
+        chat_id=message.chat.id,
+        actor_id=message.from_user.id,
+        is_root=_is_root(message),
+        limit=limit,
+    )
+    if not entries:
+        await message.answer("Компаний, ожидающих ручной проверки или повтора, нет.")
+        return
+    lines = ["Компании, требующие ручной проверки или повтора:"]
+    lines.extend(f"• {entry.review_id} — {entry.query_text} — {entry.reason}" for entry in entries)
+    await _answer_chunks(message, lines)
 
 
 @router.message(Command("check_all", "checkall"))
@@ -1330,7 +1417,7 @@ def _telegram_proxy() -> str | None:
 
 
 async def _run() -> None:
-    global agent, access_store, learning_store, history_store, license_store, audit_store, watch_store, chat_skill
+    global agent, access_store, learning_store, history_store, license_store, audit_store, watch_store, batch_review_store, chat_skill
     global reaction_settings
     load_dotenv()
     token = os.getenv("BOT_TOKEN")
@@ -1367,6 +1454,10 @@ async def _run() -> None:
     license_store = LicenseStore(os.getenv("LICENSE_DB_PATH", "data/licenses.sqlite3"))
     audit_store = AuditStore(os.getenv("AUDIT_DB_PATH", "data/audit.sqlite3"))
     watch_store = WatchStore(os.getenv("WATCH_DB_PATH", "data/watchlist.sqlite3"))
+    batch_review_store = BatchReviewStore(
+        os.getenv("BATCH_REVIEW_DB_PATH", "data/batch_review.sqlite3"),
+        hash_salt=hash_salt,
+    )
     chat_skill = ChatSkill.from_env()
     reaction_settings = ReactionSettings.from_env()
     retention = os.getenv("LEARNING_RETENTION_DAYS", "").strip()
@@ -1404,6 +1495,8 @@ async def _run() -> None:
             audit_store.close()
         if watch_store:
             watch_store.close()
+        if batch_review_store:
+            batch_review_store.close()
 
 
 def main() -> None:
