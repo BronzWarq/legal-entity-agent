@@ -17,3 +17,12 @@ def test_watchlist_remembers_inaccuracy_state() -> None:
     digest, state = store.snapshot_state(1, "ИНН 7707083893")
     assert digest is not None
     assert state == "absent"
+
+
+def test_watchlist_remove_deactivates_company() -> None:
+    store = WatchStore(":memory:")
+    store.add(1, "ИНН 7707083893", 42)
+
+    assert store.remove(1, "ИНН 7707083893") is True
+    assert store.list(1) == []
+    assert store.remove(1, "ИНН 7707083893") is False
