@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Налог — компании</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root { --ink: var(--tg-theme-text-color,#10233f); --muted: var(--tg-theme-hint-color,#6f7f95); --panel: var(--tg-theme-secondary-bg-color,#f4f7fb); --accent: #1769d1; --accent-2: #35c6e8; }
+    * { box-sizing: border-box; }
+    body { font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; margin: 0; padding: 16px; background: radial-gradient(circle at 100% 0%, rgba(53,198,232,.16), transparent 34%), var(--tg-theme-bg-color,#fff); color: var(--ink); }
+    .hero { position: relative; overflow: hidden; border-radius: 24px; padding: 18px; color: #fff; background: linear-gradient(135deg, #071f54 0%, #0d4fa5 58%, #27b9df 100%); box-shadow: 0 14px 30px rgba(12,60,130,.24); }
+    .hero::after { content: ""; position: absolute; width: 170px; height: 170px; right: -56px; top: -70px; border: 20px solid rgba(255,255,255,.12); border-radius: 50%; }
+    .brand { display: flex; align-items: center; gap: 12px; position: relative; z-index: 1; }
+    .brand img { width: 54px; height: 54px; object-fit: contain; filter: drop-shadow(0 6px 12px rgba(0,0,0,.2)); }
+    h1 { font-size: 22px; margin: 0; letter-spacing: -.02em; }
+    .hero p { position: relative; z-index: 1; margin: 14px 0 0; max-width: 290px; color: rgba(255,255,255,.82); font-size: 13px; line-height: 1.45; }
+    .panel { background: var(--panel); border-radius: 18px; padding: 14px; margin-top: 14px; }
+    .label { font-size: 12px; color: var(--muted); margin-bottom: 6px; display: block; }
+    input, button { width: 100%; box-sizing: border-box; padding: 12px; margin: 6px 0; border-radius: 12px; border: 1px solid rgba(23,105,209,.18); font: inherit; }
+    input { background: var(--tg-theme-bg-color,#fff); color: var(--ink); outline-color: var(--accent); }
+    button { appearance: none; cursor: pointer; background: linear-gradient(100deg, var(--accent), #248fe1); color: #fff; border: 0; font-weight: 650; box-shadow: 0 6px 14px rgba(23,105,209,.2); transition: transform .16s ease, box-shadow .16s ease, filter .16s ease; }
+    button:hover { filter: brightness(1.06); box-shadow: 0 8px 18px rgba(23,105,209,.28); }
+    button:active { transform: translateY(1px) scale(.99); box-shadow: 0 3px 8px rgba(23,105,209,.2); }
+    button:focus-visible { outline: 3px solid rgba(53,198,232,.55); outline-offset: 2px; }
+    button.secondary { background: linear-gradient(100deg, rgba(23,105,209,.08), rgba(53,198,232,.12)); color: var(--accent); border: 1px solid rgba(23,105,209,.28); box-shadow: none; }
+    button.secondary:hover { box-shadow: 0 5px 12px rgba(23,105,209,.14); }
+    button.danger { background: linear-gradient(100deg, #c94356, #e16a6a); box-shadow: 0 4px 10px rgba(190,54,75,.2); }
+    button.compact { width: auto; min-width: 70px; padding: 8px 10px; margin: 0 0 0 4px; border-radius: 10px; font-size: .82em; }
+    .muted { color: var(--muted); font-size: .86em; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: .86em; }
+    th, td { text-align: left; padding: 9px 4px; border-bottom: 1px solid rgba(111,127,149,.22); }
+    th { color: var(--muted); font-weight: 600; }
+    td:last-child { text-align: right; }
+    .small { width: auto; padding: 7px 9px; margin: 0 0 0 4px; }
+    .captcha-card { border: 1px solid rgba(23,105,209,.2); background: linear-gradient(135deg, rgba(23,105,209,.08), rgba(53,198,232,.12)); }
+    .captcha-status { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0 12px; }
+    .captcha-icon { font-size: 1.35rem; line-height: 1; }
+    .captcha-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .captcha-actions button { margin: 0; }
+    .captcha-actions button:last-child { grid-column: 1 / -1; }
+    .fns-frame-wrap { display: none; margin-top: 12px; overflow: hidden; border: 1px solid rgba(23,105,209,.22); border-radius: 14px; background: #fff; }
+    .fns-frame-wrap.visible { display: block; }
+    .fns-frame { width: 100%; height: min(62vh, 620px); display: block; border: 0; background: #fff; }
+    .frame-note { margin: 8px 0 0; font-size: .78em; color: var(--muted); line-height: 1.35; }
+    .email-card { border: 1px solid rgba(23,105,209,.2); background: linear-gradient(135deg, rgba(23,105,209,.06), rgba(53,198,232,.1)); }
+    .email-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .email-actions button { margin: 0; }
+    .app-footer { margin: 18px 4px 2px; text-align: center; color: var(--muted); font-size: .8em; line-height: 1.4; }
+    .app-footer a { color: var(--accent); font-weight: 650; text-decoration: none; }
+    .app-footer a:hover, .app-footer a:focus-visible { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <section class="hero">
+    <div class="brand"><img src="nalog-miniapp-mark.svg" alt="Знак проверки"><div><h1>Налог</h1><span class="muted" style="color:rgba(255,255,255,.7)">юридический контроль</span></div></div>
+    <p>Проверяйте компании, следите за изменениями и держите важные сведения под контролем.</p>
+  </section>
+  <section class="panel email-card">
+    <strong>Email-уведомления</strong>
+    <p class="muted">Укажите электронную почту, чтобы получить письмо, если при мониторинге компании появится отметка о недостоверности.</p>
+    <label class="label" for="notificationEmail">Электронная почта</label>
+    <input id="notificationEmail" type="email" placeholder="name@example.com" autocomplete="email" inputmode="email">
+    <div class="email-actions">
+      <button id="saveEmail">Сохранить email</button>
+      <button id="removeEmail" class="secondary">Отключить уведомления</button>
+    </div>
+  </section>
+  <section class="panel">
+    <label class="label" for="query">Реквизиты или описание компании</label>
+    <input id="query" placeholder="ИНН, ОГРН, КПП или название">
+    <button id="check">Проверить компанию</button>
+    <button id="add" class="secondary">Добавить в мониторинг</button>
+  </section>
+  <section class="panel captcha-card">
+    <strong>Пакетная проверка и CAPTCHA</strong>
+    <div class="captcha-status">
+      <span class="captcha-icon" aria-hidden="true">🛡️</span>
+      <p class="muted" style="margin:0">Если очередь остановилась, введите ID задания. Эта панель управляет очередью и показывает статус; CAPTCHA отображается внутри Mini App только при наличии официального виджета ФНС.</p>
+    </div>
+    <label class="label" for="batchId">ID пакетного задания</label>
+    <input id="batchId" placeholder="Например, aBc123..." autocomplete="off">
+    <div class="captcha-actions">
+      <button id="batchStatus" class="secondary">Обновить статус</button>
+      <button id="captchaDone">Подтвердить CAPTCHA</button>
+      <button id="batchCancel" class="danger">Отменить очередь</button>
+    </div>
+    <button id="openFns" class="secondary">Открыть веб‑версию ФНС здесь</button>
+    <div id="fnsFrameWrap" class="fns-frame-wrap">
+      <iframe
+        id="fnsFrame"
+        class="fns-frame"
+        title="Официальная веб-версия ФНС"
+        src="https://pb.nalog.ru/"
+        loading="lazy"
+        referrerpolicy="no-referrer"></iframe>
+      <p class="frame-note">CAPTCHA вводится вручную на официальной странице ФНС. Mini App не получает и не передаёт CAPTCHA‑токены.</p>
+    </div>
+  </section>
+  <section class="panel">
+    <strong>Компании в мониторинге</strong>
+    <p class="muted">Список текущего открытия Mini App синхронизируется с ботом при добавлении.</p>
+    <table><thead><tr><th>Компания</th><th>Состояние</th><th></th></tr></thead><tbody id="companies"></tbody></table>
+  </section>
+  <pre id="result" aria-live="polite"></pre>
+  <footer class="app-footer">
+    Нужен VPN? <a href="https://t.me/BronzVPN_bot" target="_blank" rel="noopener noreferrer">@BronzVPN_bot</a>
+  </footer>
+  <script>
+    const tg = window.Telegram?.WebApp;
+    tg?.ready();
+    const params = new URLSearchParams(window.location.search);
+    // Реквизиты не сохраняются в localStorage: после закрытия Mini App
+    // данные исчезают, а постоянный список хранится на стороне бота.
+    let rows = [];
+    const initialJobId = params.get('job_id');
+    if (initialJobId) document.querySelector('#batchId').value = initialJobId;
+    const getRows = () => rows;
+    const render = () => {
+      const body = document.querySelector('#companies');
+      body.innerHTML = '';
+      getRows().forEach((row, index) => {
+        const tr = document.createElement('tr');
+        const name = document.createElement('td'); name.textContent = row.query;
+        const state = document.createElement('td'); state.textContent = row.state || 'добавлена';
+        tr.append(name, state);
+        const td = document.createElement('td');
+        const check = document.createElement('button'); check.textContent = 'Проверить'; check.className = 'compact';
+        check.onclick = () => send('check', row.query);
+        const remove = document.createElement('button'); remove.textContent = '×'; remove.setAttribute('aria-label', 'Удалить из списка'); remove.className = 'compact danger';
+        remove.onclick = () => { rows.splice(index, 1); render(); };
+        td.append(check, remove); tr.appendChild(td); body.appendChild(tr);
+      });
+    };
+    const send = (action, value) => {
+      if (!value) return;
+      const payload = { action };
+      if (action === 'check' || action === 'watch') payload.query = value;
+      else if (action === 'set_email') payload.email = value;
+      else if (action !== 'remove_email') payload.job_id = value;
+      tg?.sendData(JSON.stringify(payload));
+      document.querySelector('#result').textContent = action === 'captcha_done'
+        ? 'Подтверждение передано боту. Очередь продолжится после ответа ФНС.'
+        : 'Команда передана боту. Ответ появится в чате.';
+    };
+    document.querySelector('#check').onclick = () => {
+      const query = document.querySelector('#query').value.trim();
+      send('check', query);
+    };
+    document.querySelector('#add').onclick = () => {
+      const query = document.querySelector('#query').value.trim(); if (!query) return;
+      if (!rows.some(row => row.query === query)) rows.push({ query, state: 'добавлена' });
+      send('watch', query); render();
+    };
+    const batchValue = () => document.querySelector('#batchId').value.trim();
+    document.querySelector('#batchStatus').onclick = () => send('batch_status', batchValue());
+    document.querySelector('#captchaDone').onclick = () => send('captcha_done', batchValue());
+    document.querySelector('#batchCancel').onclick = () => send('batch_cancel', batchValue());
+    document.querySelector('#saveEmail').onclick = () => {
+      const email = document.querySelector('#notificationEmail').value.trim();
+      send('set_email', email);
+    };
+    document.querySelector('#removeEmail').onclick = () => send('remove_email', 'remove');
+    document.querySelector('#openFns').onclick = () => {
+      const frame = document.querySelector('#fnsFrameWrap');
+      frame.classList.toggle('visible');
+      document.querySelector('#openFns').textContent = frame.classList.contains('visible')
+        ? 'Скрыть веб‑версию ФНС'
+        : 'Открыть веб‑версию ФНС здесь';
+    };
+    render();
+  </script>
+</body>
+</html>
