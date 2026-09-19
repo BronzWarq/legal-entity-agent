@@ -38,7 +38,8 @@ class WatchStore:
 
     def remove(self, chat_id: int | str, query: str) -> bool:
         with self._lock, self._db:
-            cursor = self._db.execute("UPDATE watchlist SET active=0 WHERE chat_id=? AND query=?",
+            cursor = self._db.execute(
+                "UPDATE watchlist SET active=0 WHERE chat_id=? AND query=? AND active=1",
                                      (str(chat_id), query.strip()))
             return bool(cursor.rowcount)
 
