@@ -29,6 +29,7 @@ from .models import (
     InaccuracyState,
     SearchQuery,
 )
+from .notifications import EmailSubscriptionStore, SmtpConfig, normalize_email, send_email
 from .permissions import ChatAccessStore, TrustedUser, is_main_admin
 from .reactions import STANDARD_TELEGRAM_REACTIONS, ReactionSettings
 from .watchlist import WatchStore
@@ -62,6 +63,8 @@ __all__ = [
     "LegalEntityAgent",
     "NaturalIntent",
     "NaturalRequest",
+    "EmailSubscriptionStore",
+    "SmtpConfig",
     "ReactionSettings",
     "SearchQuery",
     "TrustedUser",
@@ -70,5 +73,7 @@ __all__ = [
     "parse_natural_request",
     "parse_search_query",
     "parse_upload",
+    "normalize_email",
+    "send_email",
     "WatchStore",
 ]
