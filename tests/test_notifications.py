@@ -73,3 +73,4 @@ def test_send_email_uses_starttls_and_login(monkeypatch) -> None:
     assert calls[4] == ("login", "user", "secret")
     assert calls[5]["To"] == "to@example.com"
     assert calls[5].get_content().strip() == "Body"
+
