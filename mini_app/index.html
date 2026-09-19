@@ -159,14 +159,14 @@
         check.setAttribute('aria-label', `Проверить компанию ${row.query}`);
         check.onclick = () => send('check', row.query);
         const remove = document.createElement('button'); remove.textContent = '×'; remove.setAttribute('aria-label', `Удалить компанию ${row.query} из мониторинга`); remove.title = `Удалить компанию ${row.query} из мониторинга`; remove.className = 'compact danger';
-        remove.onclick = () => { rows.splice(index, 1); render(); };
+        remove.onclick = () => { send('unwatch', row.query); rows.splice(index, 1); render(); };
         td.append(check, remove); tr.appendChild(td); body.appendChild(tr);
       });
     };
     const send = (action, value) => {
       if (!value) return;
       const payload = { action };
-      if (action === 'check' || action === 'watch') payload.query = value;
+      if (action === 'check' || action === 'watch' || action === 'unwatch') payload.query = value;
       else if (action === 'set_email') payload.email = value;
       else if (action !== 'remove_email') payload.job_id = value;
       tg?.sendData(JSON.stringify(payload));
@@ -205,4 +205,3 @@
   </script>
 </body>
 </html>
-
