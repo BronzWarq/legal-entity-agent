@@ -10,3 +10,5 @@ def test_mini_app_monitoring_controls_update_server_state() -> None:
     assert "send('unwatch', row.query)" in html
     assert "action === 'unwatch'" in html
     assert 'action not in {"check", "watch", "unwatch"}' in bot_source
+    assert 'class="hero-chip"' in html
+    assert "prefers-reduced-motion" in html
