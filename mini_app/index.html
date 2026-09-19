@@ -33,6 +33,12 @@
     th { color: var(--muted); font-weight: 600; }
     td:last-child { text-align: right; }
     .small { width: auto; padding: 7px 9px; margin: 0 0 0 4px; }
+    .captcha-card { border: 1px solid rgba(23,105,209,.2); background: linear-gradient(135deg, rgba(23,105,209,.08), rgba(53,198,232,.12)); }
+    .captcha-status { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0 12px; }
+    .captcha-icon { font-size: 1.35rem; line-height: 1; }
+    .captcha-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .captcha-actions button { margin: 0; }
+    .captcha-actions button:last-child { grid-column: 1 / -1; }
   </style>
 </head>
 <body>
@@ -45,6 +51,20 @@
     <input id="query" placeholder="ИНН, ОГРН, КПП или название">
     <button id="check">Проверить компанию</button>
     <button id="add" class="secondary">Добавить в мониторинг</button>
+  </section>
+  <section class="panel captcha-card">
+    <strong>Пакетная проверка и CAPTCHA</strong>
+    <div class="captcha-status">
+      <span class="captcha-icon" aria-hidden="true">🛡️</span>
+      <p class="muted" style="margin:0">Если очередь остановилась, введите ID задания. Эта панель управляет очередью и показывает статус; CAPTCHA отображается внутри Mini App только при наличии официального виджета ФНС.</p>
+    </div>
+    <label class="label" for="batchId">ID пакетного задания</label>
+    <input id="batchId" placeholder="Например, aBc123..." autocomplete="off">
+    <div class="captcha-actions">
+      <button id="batchStatus" class="secondary">Обновить статус</button>
+      <button id="captchaDone">Подтвердить CAPTCHA</button>
+      <button id="batchCancel" class="danger">Отменить очередь</button>
+    </div>
   </section>
   <section class="panel">
     <strong>Компании в мониторинге</strong>
@@ -75,10 +95,15 @@
         td.append(check, remove); tr.appendChild(td); body.appendChild(tr);
       });
     };
-    const send = (action, query) => {
-      if (!query) return;
-      tg?.sendData(JSON.stringify({ action, query }));
-      document.querySelector('#result').textContent = 'Запрос передан боту. Результат появится в чате.';
+    const send = (action, value) => {
+      if (!value) return;
+      const payload = { action };
+      if (action === 'check' || action === 'watch') payload.query = value;
+      else payload.job_id = value;
+      tg?.sendData(JSON.stringify(payload));
+      document.querySelector('#result').textContent = action === 'captcha_done'
+        ? 'Подтверждение передано боту. Очередь продолжится после ответа ФНС.'
+        : 'Команда передана боту. Ответ появится в чате.';
     };
     document.querySelector('#check').onclick = () => {
       const query = document.querySelector('#query').value.trim();
@@ -89,6 +114,10 @@
       if (!rows.some(row => row.query === query)) rows.push({ query, state: 'добавлена' });
       send('watch', query); render();
     };
+    const batchValue = () => document.querySelector('#batchId').value.trim();
+    document.querySelector('#batchStatus').onclick = () => send('batch_status', batchValue());
+    document.querySelector('#captchaDone').onclick = () => send('captcha_done', batchValue());
+    document.querySelector('#batchCancel').onclick = () => send('batch_cancel', batchValue());
     render();
   </script>
 </body>
