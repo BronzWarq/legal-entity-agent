@@ -15,10 +15,12 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     MenuButtonWebApp,
     Message,
     ReactionTypeCustomEmoji,
     ReactionTypeEmoji,
+    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 from dotenv import load_dotenv
@@ -94,6 +96,34 @@ def _mini_app_keyboard(*, job_id: str | None = None) -> InlineKeyboardMarkup | N
         inline_keyboard=[
             [InlineKeyboardButton(text="Открыть Mini App", web_app=WebAppInfo(url=url))]
         ]
+    )
+
+
+def bot_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Возвращает постоянное меню быстрых действий Telegram-бота."""
+
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="🔎 Проверить компанию"),
+                KeyboardButton(text="📋 История проверок"),
+            ],
+            [
+                KeyboardButton(text="📊 Проверить все"),
+                KeyboardButton(text="📁 Загрузить CSV/XLSX"),
+            ],
+            [
+                KeyboardButton(text="👁 Мониторинг"),
+                KeyboardButton(text="📄 Лицензии"),
+            ],
+            [
+                KeyboardButton(text="🆘 Помощь"),
+                KeyboardButton(text="🧠 Навыки"),
+            ],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Выберите действие или напишите запрос",
     )
 
 
@@ -181,6 +211,7 @@ def help_text() -> str:
         "Команды бота:\n\n"
         "/start — запустить бота и получить краткую инструкцию.\n"
         "/help — показать этот список команд.\n"
+        "/menu — показать постоянное меню быстрых действий.\n"
         "/skills — рассказать, что умеет агент.\n"
         "/check реквизиты — проверить юридическое лицо по данным ФНС.\n"
         "  Можно указать ИНН, ОГРН, КПП, название, адрес или несколько реквизитов.\n"
@@ -255,7 +286,8 @@ async def start(message: Message, bot: Bot) -> None:
         "Агент готов. Для проверки используйте /check и реквизиты юридического лица.\n"
         "Можно обратиться свободной фразой: «Налог, проверь компанию с ИНН 7707083893».\n"
         "После ответа можно поставить оценку кнопками обратной связи.\n"
-        "Для полного списка команд используйте /help."
+        "Для полного списка команд используйте /help.",
+        reply_markup=bot_menu_keyboard(),
     )
 
 
@@ -267,6 +299,11 @@ async def help_command(message: Message) -> None:
 @router.message(Command("skills", "about"))
 async def skills_command(message: Message) -> None:
     await message.answer(skills_text())
+
+
+@router.message(Command("menu"))
+async def menu_command(message: Message) -> None:
+    await message.answer("Быстрые действия бота:", reply_markup=bot_menu_keyboard())
 
 
 @router.message(Command("app"))
@@ -1380,11 +1417,45 @@ async def trusted_users(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+async def _handle_menu_action(message: Message, text: str) -> bool:
+    """Обрабатывает подписи постоянной клавиатуры и сообщает, что действие принято."""
+
+    action = text.strip()
+    if action == "🔎 Проверить компанию":
+        await message.answer(
+            "Введите реквизиты компании одним сообщением, например:\n"
+            "/check ИНН 7707083893\n\n"
+            "Или напишите: «Налог, проверь компанию с ИНН …»."
+        )
+    elif action == "📋 История проверок":
+        await _show_history(message)
+    elif action == "📊 Проверить все":
+        await check_all(message)
+    elif action == "📁 Загрузить CSV/XLSX":
+        await message.answer(
+            "Прикрепите файл CSV или XLSX и добавьте к подписи сообщения «/bulk».\n"
+            "Файл будет обработан последовательно, с остановкой очереди при CAPTCHA."
+        )
+    elif action == "👁 Мониторинг":
+        await watched_command(message)
+    elif action == "📄 Лицензии":
+        await license_list_command(message)
+    elif action == "🆘 Помощь":
+        await help_command(message)
+    elif action == "🧠 Навыки":
+        await skills_command(message)
+    else:
+        return False
+    return True
+
+
 @router.message()
 async def natural_language(message: Message) -> None:
     """Обрабатывает русские сообщения, начинающиеся с обращения «Налог»."""
 
     if not message.text:
+        return
+    if await _handle_menu_action(message, message.text):
         return
     request = parse_natural_request(message.text)
     if request is None:
