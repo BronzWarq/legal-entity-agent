@@ -38,6 +38,7 @@ from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
 from .licenses import LicenseStore, new_license
 from .models import SearchQuery
+from .notifications import EmailSubscriptionStore, SmtpConfig, normalize_email, send_email
 from .permissions import ChatAccessStore, is_main_admin, normalize_tag
 from .reactions import ReactionSettings
 from .render import format_assessment
@@ -51,6 +52,8 @@ history_store: HistoryStore | None = None
 license_store: LicenseStore | None = None
 audit_store: AuditStore | None = None
 watch_store: WatchStore | None = None
+notification_store: EmailSubscriptionStore | None = None
+smtp_config = SmtpConfig(host="")
 batch_review_store: BatchReviewStore | None = None
 chat_skill: ChatSkill | None = None
 reaction_settings = ReactionSettings()
@@ -193,6 +196,7 @@ def help_text() -> str:
         "/watch реквизиты — добавить компанию в список мониторинга.\n"
         "/unwatch реквизиты — убрать компанию из списка мониторинга.\n"
         "/watched — показать список компаний для мониторинга.\n"
+        "Настройка email-уведомлений доступна в Mini App.\n"
         "/app — открыть Telegram Mini App (если задан MINI_APP_URL).\n"
         "/check_all (или /check all) — повторно проверить все уникальные юрлица из базы истории (администратор).\n"
         "/batch_status — показать состояние текущей массовой проверки.\n"
@@ -1172,6 +1176,36 @@ async def mini_app_data(message: Message) -> None:
         await message.answer("Mini App передал некорректные данные.")
         return
     action = payload.get("action")
+    if action in {"set_email", "remove_email"}:
+        if not message.from_user or not _allowed(message) or notification_store is None:
+            await message.answer("У вас нет разрешения на настройку email-уведомлений.")
+            return
+        if action == "remove_email":
+            removed = notification_store.remove(message.chat.id)
+            _audit(message, "email_notifications_disabled", "email_removed")
+            await message.answer(
+                "Email-уведомления отключены." if removed else "Для этого чата email-уведомления не были настроены."
+            )
+            return
+        raw_email = payload.get("email")
+        if not isinstance(raw_email, str):
+            await message.answer("Укажите адрес электронной почты в Mini App.")
+            return
+        try:
+            email = normalize_email(raw_email)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        notification_store.set(message.chat.id, email, message.from_user.id)
+        _audit(message, "email_notifications_enabled", "email_saved")
+        if smtp_config.configured:
+            await message.answer(f"Email {email} сохранён. Уведомления будут отправляться при появлении отметки ФНС.")
+        else:
+            await message.answer(
+                f"Email {email} сохранён, но отправка пока не настроена на сервере. "
+                "Администратору нужно задать SMTP_HOST и SMTP_FROM."
+            )
+        return
     if action in {"captcha_done", "batch_cancel", "batch_status"}:
         if not message.from_user or not _can_check(message):
             await message.answer("У вас нет разрешения управлять пакетной проверкой.")
@@ -1419,11 +1453,59 @@ async def _monitor_loop(bot: Bot, interval_seconds: int) -> None:
                         record.status, record.inaccuracy_state.value,
                         ",".join(record.inaccuracy_markers),
                     ))
-                    if watch_store.update_snapshot(chat_id, raw_query, snapshot):
+                    previous_digest, previous_state = watch_store.snapshot_state(chat_id, raw_query)
+                    current_state = record.inaccuracy_state.value
+                    if watch_store.update_snapshot_with_state(
+                        chat_id,
+                        raw_query,
+                        snapshot,
+                        inaccuracy_state=current_state,
+                    ):
                         await bot.send_message(
                             int(chat_id),
                             "⚠️ Изменились данные компании в мониторинге.\n\n" + format_assessment(result),
                         )
+                    if previous_digest is None:
+                        if notification_store:
+                            notification_store.mark_alert_state(chat_id, raw_query, current_state)
+                    elif current_state != "present" and notification_store:
+                        notification_store.mark_alert_state(chat_id, raw_query, current_state)
+                    elif current_state == "present" and notification_store:
+                        # Existing rows created before state tracking are treated
+                        # as a baseline on their first post-upgrade check.
+                        if previous_state is None:
+                            notification_store.mark_alert_state(chat_id, raw_query, "present")
+                            continue
+                        recipient = notification_store.get(chat_id)
+                        alert_state = notification_store.alert_state(chat_id, raw_query)
+                        if recipient and alert_state != "present":
+                            if not smtp_config.configured:
+                                logging.warning(
+                                    "Email-уведомление не отправлено для %s: SMTP не настроен",
+                                    raw_query,
+                                )
+                            else:
+                                title = record.name or record.inn or raw_query
+                                subject = f"[Налог] Недостоверные сведения: {title}"
+                                body = (
+                                    "В результате очередной проверки ФНС обнаружена отметка о "
+                                    "недостоверности сведений.\n\n"
+                                    f"Запрос: {raw_query}\n"
+                                    f"Компания: {title}\n"
+                                    f"ИНН: {record.inn or 'не указан'}\n"
+                                    f"ОГРН: {record.ogrn or 'не указан'}\n"
+                                    f"КПП: {record.kpp or 'не указан'}\n"
+                                    f"Маркеры: {', '.join(record.inaccuracy_markers) or 'не указаны'}\n"
+                                    f"Источник: {record.source_url}\n"
+                                    f"Проверено: {record.fetched_at:%d.%m.%Y %H:%M UTC}\n\n"
+                                    f"{format_assessment(result)}"
+                                )
+                                try:
+                                    await asyncio.to_thread(send_email, smtp_config, recipient, subject, body)
+                                except Exception:
+                                    logging.exception("Не удалось отправить email-уведомление для %s", raw_query)
+                                else:
+                                    notification_store.mark_alert_state(chat_id, raw_query, "present")
             if license_store:
                 for license_record in license_store.expiring(_positive_env_int("LICENSE_ALERT_DAYS", 30)):
                     days = license_record.days_left()
@@ -1455,6 +1537,18 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return default if value is None else value.strip().casefold() in {"1", "true", "yes", "да"}
 
 
+def _smtp_config_from_env() -> SmtpConfig:
+    return SmtpConfig(
+        host=os.getenv("SMTP_HOST", "").strip(),
+        port=_positive_env_int("SMTP_PORT", 587),
+        username=os.getenv("SMTP_USER", "").strip(),
+        password=os.getenv("SMTP_PASSWORD", ""),
+        sender=os.getenv("SMTP_FROM", "").strip() or os.getenv("SMTP_USER", "").strip(),
+        starttls=_env_bool("SMTP_STARTTLS", True),
+        timeout=_positive_env_float("SMTP_TIMEOUT_SECONDS", 20.0),
+    )
+
+
 def _telegram_proxy() -> str | None:
     """Возвращает проверенный прокси для Telegram API без вывода секрета в логи."""
 
@@ -1471,7 +1565,8 @@ def _telegram_proxy() -> str | None:
 
 
 async def _run() -> None:
-    global agent, access_store, learning_store, history_store, license_store, audit_store, watch_store, batch_review_store, chat_skill
+    global agent, access_store, learning_store, history_store, license_store, audit_store, watch_store
+    global notification_store, smtp_config, batch_review_store, chat_skill
     global reaction_settings
     load_dotenv()
     token = os.getenv("BOT_TOKEN")
@@ -1508,6 +1603,10 @@ async def _run() -> None:
     license_store = LicenseStore(os.getenv("LICENSE_DB_PATH", "data/licenses.sqlite3"))
     audit_store = AuditStore(os.getenv("AUDIT_DB_PATH", "data/audit.sqlite3"))
     watch_store = WatchStore(os.getenv("WATCH_DB_PATH", "data/watchlist.sqlite3"))
+    notification_store = EmailSubscriptionStore(
+        os.getenv("NOTIFICATION_DB_PATH", "data/notifications.sqlite3")
+    )
+    smtp_config = _smtp_config_from_env()
     batch_review_store = BatchReviewStore(
         os.getenv("BATCH_REVIEW_DB_PATH", "data/batch_review.sqlite3"),
         hash_salt=hash_salt,
@@ -1549,6 +1648,8 @@ async def _run() -> None:
             audit_store.close()
         if watch_store:
             watch_store.close()
+        if notification_store:
+            notification_store.close()
         if batch_review_store:
             batch_review_store.close()
 
