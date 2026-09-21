@@ -1433,7 +1433,9 @@ async def trusted_users(message: Message) -> None:
 async def _handle_menu_action(message: Message, text: str) -> bool:
     """Обрабатывает подписи постоянной клавиатуры и сообщает, что действие принято."""
 
-    action = text.strip()
+    # Telegram-клиенты могут добавлять variation selector к emoji в подписи
+    # кнопки. Убираем его, чтобы нажатие не зависело от конкретного клиента.
+    action = text.strip().replace("\ufe0e", "").replace("\ufe0f", "")
     if action == "🔎 Проверить компанию":
         await message.answer(
             "Введите реквизиты компании одним сообщением, например:\n"
