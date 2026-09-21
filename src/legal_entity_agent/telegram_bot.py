@@ -62,6 +62,19 @@ reaction_settings = ReactionSettings()
 batch_jobs = BatchJobRegistry()
 batch_tasks: dict[str, asyncio.Task[None]] = {}
 
+BOT_MENU_ACTIONS = frozenset(
+    {
+        "🔎 Проверить компанию",
+        "📋 История проверок",
+        "📊 Проверить все",
+        "📁 Загрузить CSV/XLSX",
+        "👁 Мониторинг",
+        "📄 Лицензии",
+        "🆘 Помощь",
+        "🧠 Навыки",
+    }
+)
+
 
 def _audit(message: Message, action: str, details: str = "") -> None:
     if audit_store and message.from_user:
@@ -1447,6 +1460,15 @@ async def _handle_menu_action(message: Message, text: str) -> bool:
     else:
         return False
     return True
+
+
+@router.message(F.text.in_(BOT_MENU_ACTIONS))
+async def menu_action(message: Message) -> None:
+    """Обрабатывает нажатия постоянной клавиатуры отдельным маршрутом."""
+
+    if message.text:
+        logging.info("Обработка действия меню Telegram: %s", message.text)
+        await _handle_menu_action(message, message.text)
 
 
 @router.message()
