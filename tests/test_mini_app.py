@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from legal_entity_agent.telegram_bot import _mini_app_reply_keyboard
+
 ROOT = Path(__file__).parents[1]
 
 
@@ -36,3 +38,13 @@ def test_mini_app_link_carries_chat_context() -> None:
     assert "_mini_app_keyboard(chat_id=message.chat.id)" in bot_source
     assert "chat_id={quote(str(chat_id), safe='')}" in bot_source
 
+
+def test_private_chat_uses_reply_web_app_button_for_send_data(monkeypatch) -> None:
+    monkeypatch.setenv("MINI_APP_URL", "https://example.test/mini_app/")
+
+    keyboard = _mini_app_reply_keyboard(chat_id=12345)
+
+    assert keyboard is not None
+    assert keyboard.one_time_keyboard is True
+    assert keyboard.keyboard[0][0].text == "Открыть Mini App"
+    assert keyboard.keyboard[0][0].web_app.url == "https://example.test/mini_app/?chat_id=12345&transport=web_app_data"
