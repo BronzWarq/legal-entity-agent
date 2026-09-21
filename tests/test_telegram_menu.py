@@ -1,19 +1,9 @@
-from legal_entity_agent.telegram_bot import bot_menu_keyboard
-
-
-def test_bot_menu_has_two_column_quick_actions() -> None:
-    menu = bot_menu_keyboard()
-
-    assert [len(row) for row in menu.keyboard] == [2, 2, 2, 2]
-    assert [button.text for row in menu.keyboard for button in row] == [
-        "🔎 Проверить компанию",
-        "📋 История проверок",
-        "📊 Проверить все",
-        "📁 Загрузить CSV/XLSX",
-        "👁 Мониторинг",
-        "📄 Лицензии",
-        "🆘 Помощь",
-        "🧠 Навыки",
-    ]
-    assert menu.resize_keyboard is True
-    assert menu.is_persistent is True
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/pathlib.py", line 1027, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/codex/runtimes/codex-primary-runtime/dependencies/python/lib/python3.12/pathlib.py", line 1013, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'tests/test_telegram_menu.py'
