@@ -1591,7 +1591,10 @@ async def mini_app_data(message: Message) -> None:
                 "Компания удалена из мониторинга." if removed else "Компания не найдена в мониторинге."
             )
         return
-    await _run_check(message, payload["query"], suppress_blocked_error=True)
+    # Не скрываем ошибку CAPTCHA/антибот-защиты: при запуске из Mini App
+    # подтверждение в интерфейсе уже показано, поэтому результат или причина
+    # отказа должны обязательно прийти отдельным сообщением в исходный чат.
+    await _run_check(message, payload["query"])
 
 
 @router.callback_query(F.data.startswith("shared_list:"))

@@ -1,6 +1,10 @@
 from pathlib import Path
+from types import SimpleNamespace
 
-from legal_entity_agent.telegram_bot import _mini_app_reply_keyboard
+import pytest
+
+from legal_entity_agent import telegram_bot
+from legal_entity_agent.fns_client import FnsBlockedError
 
 ROOT = Path(__file__).parents[1]
 
@@ -42,9 +46,38 @@ def test_mini_app_link_carries_chat_context() -> None:
 def test_private_chat_uses_reply_web_app_button_for_send_data(monkeypatch) -> None:
     monkeypatch.setenv("MINI_APP_URL", "https://example.test/mini_app/")
 
-    keyboard = _mini_app_reply_keyboard(chat_id=12345)
+    keyboard = telegram_bot._mini_app_reply_keyboard(chat_id=12345)
 
     assert keyboard is not None
     assert keyboard.one_time_keyboard is True
     assert keyboard.keyboard[0][0].text == "Открыть Mini App"
     assert keyboard.keyboard[0][0].web_app.url == "https://example.test/mini_app/?chat_id=12345&transport=web_app_data"
+
+
+@pytest.mark.asyncio
+async def test_mini_app_check_reports_fns_block_to_chat(monkeypatch) -> None:
+    class Access:
+        def role_for(self, chat_id, *, user_id, username):
+            return "checker"
+
+    class Agent:
+        async def check(self, query):
+            raise FnsBlockedError("ФНС запросила CAPTCHA или ограничила автоматический запрос.")
+
+    answers: list[str] = []
+
+    class Message:
+        chat = SimpleNamespace(id=-100123, type="group")
+        from_user = SimpleNamespace(id=42, username="checker")
+
+        async def answer(self, text, **kwargs):
+            answers.append(text)
+
+    monkeypatch.setattr(telegram_bot, "access_store", Access())
+    monkeypatch.setattr(telegram_bot, "agent", Agent())
+    monkeypatch.setattr(telegram_bot, "learning_store", None)
+    monkeypatch.delenv("MINI_APP_URL", raising=False)
+
+    await telegram_bot._run_check(Message(), "7707083893")
+
+    assert answers == ["Проверка ФНС не выполнена: ФНС запросила CAPTCHA или ограничила автоматический запрос."]
