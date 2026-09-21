@@ -167,6 +167,14 @@
       <button id="add" class="secondary">Добавить в мониторинг</button>
       <p class="button-help">Сохранить компанию для будущих автоматических проверок.</p>
     </div>
+    <div class="button-block">
+      <button id="shareList" class="secondary">Поделиться списком в этом чате</button>
+      <p class="button-help">Передать список другому пользователю этого чата для добавления в его MiniApp.</p>
+    </div>
+    <div class="button-block">
+      <button id="exportExcel" class="secondary">Выгрузить результат в Excel</button>
+      <p class="button-help">Скачать результаты проверок компаний из текущего списка в формате .xlsx.</p>
+    </div>
   </section>
   <section class="panel captcha-card">
     <strong>Пакетная проверка и CAPTCHA</strong>
@@ -206,8 +214,8 @@
     </div>
   </section>
   <section class="panel">
-    <strong>Компании в мониторинге</strong>
-    <p class="muted">Список текущего открытия Mini App синхронизируется с ботом при добавлении.</p>
+    <strong>Компании в списке</strong>
+    <p class="muted">Список сохраняется отдельно для Telegram-пользователя в каждом чате и восстанавливается после повторного открытия Mini App.</p>
     <table><thead><tr><th>Компания</th><th>Состояние</th><th></th></tr></thead><tbody id="companies"></tbody></table>
   </section>
   <pre id="result" aria-live="polite"></pre>
@@ -218,9 +226,50 @@
     const tg = window.Telegram?.WebApp;
     tg?.ready();
     const params = new URLSearchParams(window.location.search);
-    // Реквизиты не сохраняются в localStorage: после закрытия Mini App
-    // данные исчезают, а постоянный список хранится на стороне бота.
-    let rows = [];
+    const telegramUserId = tg?.initDataUnsafe?.user?.id;
+    const initChatId = tg?.initDataUnsafe?.chat?.id;
+    const urlChatId = params.get('chat_id');
+    const telegramChatId = initChatId || urlChatId;
+    const chatKey = telegramChatId || `private:${telegramUserId || 'anonymous'}`;
+    const storageKey = `nalog:checked-companies:${chatKey}:${telegramUserId || 'anonymous'}`;
+    const loadRows = () => {
+      try {
+        const saved = JSON.parse(localStorage.getItem(storageKey) || '[]');
+        return Array.isArray(saved)
+          ? saved.filter(row => row && typeof row.query === 'string' && row.query.trim())
+          : [];
+      } catch (error) {
+        return [];
+      }
+    };
+    let rows = loadRows();
+    const persistRows = () => localStorage.setItem(storageKey, JSON.stringify(rows));
+    const rememberQuery = (value, state = 'проверялась') => {
+      const query = value.trim().replace(/\s+/g, ' ');
+      if (!query) return;
+      const existing = rows.find(row => row.query === query);
+      if (existing) existing.state = existing.state || state;
+      else rows.push({ query, state });
+      persistRows();
+    };
+    const importSharedRows = () => {
+      const raw = params.get('shared_queries');
+      if (!raw || (initChatId && urlChatId && String(initChatId) !== String(urlChatId))) return 0;
+      try {
+        const shared = JSON.parse(raw);
+        if (!Array.isArray(shared)) return 0;
+        let imported = 0;
+        shared.filter(query => typeof query === 'string' && query.trim()).forEach(query => {
+          const before = rows.length;
+          rememberQuery(query, 'получена из общего списка');
+          if (rows.length > before) imported += 1;
+        });
+        return imported;
+      } catch (error) {
+        return 0;
+      }
+    };
+    const importedRows = importSharedRows();
     const initialJobId = params.get('job_id');
     if (initialJobId) document.querySelector('#batchId').value = initialJobId;
     const getRows = () => rows;
@@ -238,15 +287,17 @@
         check.setAttribute('aria-label', `Проверить компанию ${row.query}`);
         check.onclick = () => send('check', row.query);
         const remove = document.createElement('button'); remove.textContent = '×'; remove.setAttribute('aria-label', `Удалить компанию ${row.query} из мониторинга`); remove.title = `Удалить компанию ${row.query} из мониторинга`; remove.className = 'compact danger';
-        remove.onclick = () => { send('unwatch', row.query); rows.splice(index, 1); render(); };
+        remove.onclick = () => { send('unwatch', row.query); rows.splice(index, 1); persistRows(); render(); };
         td.append(check, remove); tr.appendChild(td); body.appendChild(tr);
       });
     };
     const send = (action, value) => {
-      if (!value) return;
+      if (action !== 'share_list' && !value) return;
+      if (action === 'check' || action === 'watch') rememberQuery(value, action === 'watch' ? 'добавлена' : 'проверялась');
       const payload = { action };
       if (action === 'check' || action === 'watch' || action === 'unwatch') payload.query = value;
       else if (action === 'set_email') payload.email = value;
+      else if (action === 'share_list') payload.queries = rows.map(row => row.query);
       else if (action !== 'remove_email') payload.job_id = value;
       tg?.sendData(JSON.stringify(payload));
       document.querySelector('#result').textContent = action === 'captcha_done'
@@ -259,8 +310,22 @@
     };
     document.querySelector('#add').onclick = () => {
       const query = document.querySelector('#query').value.trim(); if (!query) return;
-      if (!rows.some(row => row.query === query)) rows.push({ query, state: 'добавлена' });
+      rememberQuery(query, 'добавлена');
       send('watch', query); render();
+    };
+    document.querySelector('#shareList').onclick = () => {
+      if (!rows.length) {
+        document.querySelector('#result').textContent = 'Список пока пуст: сначала выполните хотя бы одну проверку.';
+        return;
+      }
+      send('share_list');
+    };
+    document.querySelector('#exportExcel').onclick = () => {
+      if (!rows.length) {
+        document.querySelector('#result').textContent = 'Список пока пуст: сначала выполните хотя бы одну проверку.';
+        return;
+      }
+      send('export_excel');
     };
     const batchValue = () => document.querySelector('#batchId').value.trim();
     document.querySelector('#batchStatus').onclick = () => send('batch_status', batchValue());
@@ -281,6 +346,8 @@
         : 'Открыть веб‑версию ФНС здесь';
     };
     render();
+    if (importedRows) document.querySelector('#result').textContent = `Добавлено компаний из общего списка: ${importedRows}.`;
   </script>
 </body>
 </html>
+
