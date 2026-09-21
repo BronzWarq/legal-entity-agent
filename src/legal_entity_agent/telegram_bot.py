@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
 import secrets
 from datetime import UTC, datetime
-from urllib.parse import quote, urlparse
+from types import SimpleNamespace
+from urllib.parse import parse_qsl, quote, urlparse
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -24,6 +27,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     WebAppInfo,
 )
+from aiohttp import web
 from dotenv import load_dotenv
 
 from .agent import LegalEntityAgent
@@ -65,6 +69,7 @@ reaction_settings = ReactionSettings()
 batch_jobs = BatchJobRegistry()
 batch_tasks: dict[str, asyncio.Task[None]] = {}
 MAX_SHARED_MINI_APP_URL_LENGTH = 3500
+MINI_APP_API_PATH = "/mini-app-api"
 
 BOT_MENU_ACTIONS = frozenset(
     {
@@ -94,11 +99,19 @@ def _mini_app_url() -> str:
     return url if url.startswith("https://") else ""
 
 
+def _mini_app_api_url() -> str:
+    """Возвращает HTTPS-адрес API Mini App, если он настроен."""
+
+    url = os.getenv("MINI_APP_API_URL", "").strip()
+    return url if url.startswith("https://") else ""
+
+
 def _mini_app_link(
     *,
     job_id: str | None = None,
     chat_id: int | str | None = None,
     shared_queries: list[str] | None = None,
+    transport: str = "api",
 ) -> str:
     """Возвращает ссылку Mini App с контекстом задания и чата, если он задан."""
 
@@ -113,6 +126,10 @@ def _mini_app_link(
     if shared_queries:
         encoded = json.dumps(shared_queries, ensure_ascii=False, separators=(",", ":"))
         params.append(f"shared_queries={quote(encoded, safe='')}")
+    api_url = _mini_app_api_url()
+    if api_url:
+        params.append(f"api_url={quote(api_url, safe='')}")
+    params.append(f"transport={quote(transport, safe='')}")
     if not params:
         return url
     separator = "&" if "?" in url else "?"
@@ -125,7 +142,7 @@ def _mini_app_keyboard(
     chat_id: int | str | None = None,
     shared_queries: list[str] | None = None,
 ) -> InlineKeyboardMarkup | None:
-    url = _mini_app_link(job_id=job_id, chat_id=chat_id, shared_queries=shared_queries)
+    url = _mini_app_link(job_id=job_id, chat_id=chat_id, shared_queries=shared_queries, transport="api")
     if not url:
         return None
     return InlineKeyboardMarkup(
@@ -133,8 +150,151 @@ def _mini_app_keyboard(
     )
 
 
+def _mini_app_reply_keyboard(
+    *,
+    job_id: str | None = None,
+    chat_id: int | str | None = None,
+) -> ReplyKeyboardMarkup | None:
+    """Возвращает клавиатуру запуска Mini App для личного чата.
+
+    Telegram передаёт ``Telegram.WebApp.sendData`` боту только для Mini App,
+    открытого через ``KeyboardButton(web_app=...)``. Inline-кнопка подходит
+    для открытия приложения в группах, но не создаёт ``web_app_data``-сообщение.
+    """
+
+    url = _mini_app_link(job_id=job_id, chat_id=chat_id, transport="web_app_data")
+    if not url:
+        return None
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Открыть Mini App", web_app=WebAppInfo(url=url))]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="Нажмите «Открыть Mini App»",
+    )
+
+
+class _MiniAppMessage:
+    """Минимальный контекст сообщения для действий, пришедших по HTTPS API."""
+
+    def __init__(self, bot: Bot, chat_id: int, user, payload: dict) -> None:
+        self.bot = bot
+        self.chat = SimpleNamespace(id=chat_id, type="group")
+        self.from_user = user
+        self.web_app_data = SimpleNamespace(data=json.dumps(payload, ensure_ascii=False))
+
+    async def answer(self, text: str, **kwargs):
+        return await self.bot.send_message(chat_id=self.chat.id, text=text, **kwargs)
+
+    async def answer_document(self, document, caption: str | None = None, **kwargs):
+        return await self.bot.send_document(chat_id=self.chat.id, document=document, caption=caption, **kwargs)
+
+
+def _verify_mini_app_init_data(init_data: str, bot_token: str):
+    """Проверяет подпись Telegram WebApp initData и возвращает пользователя."""
+
+    if not init_data or len(init_data) > 8192:
+        raise ValueError("Пустые или слишком длинные initData")
+    pairs = parse_qsl(init_data, keep_blank_values=True)
+    received_hash = next((value for key, value in pairs if key == "hash"), "")
+    if not received_hash:
+        raise ValueError("В initData отсутствует подпись Telegram")
+    check_string = "\n".join(f"{key}={value}" for key, value in sorted(pairs) if key != "hash")
+    secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    expected_hash = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(received_hash, expected_hash):
+        raise ValueError("Недействительная подпись Telegram")
+    values = dict(pairs)
+    try:
+        auth_date = int(values["auth_date"])
+        user_data = json.loads(values["user"])
+        user_id = int(user_data["id"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("В initData отсутствуют данные пользователя Telegram") from exc
+    now = int(datetime.now(UTC).timestamp())
+    max_age = _positive_env_int("MINI_APP_INIT_DATA_MAX_AGE_SECONDS", 86400)
+    if auth_date > now + 300 or now - auth_date > max_age:
+        raise ValueError("Срок действия initData Telegram истёк")
+    username = user_data.get("username")
+    return SimpleNamespace(id=user_id, username=username if isinstance(username, str) else None)
+
+
+def _mini_app_allowed_origin() -> str:
+    configured = os.getenv("MINI_APP_ALLOWED_ORIGIN", "").strip().rstrip("/")
+    if configured:
+        return configured
+    parsed = urlparse(_mini_app_url())
+    return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+
+
+@web.middleware
+async def _mini_app_cors_middleware(request: web.Request, handler):
+    origin = request.headers.get("Origin", "")
+    allowed_origin = _mini_app_allowed_origin()
+    if origin and origin != allowed_origin:
+        return web.json_response({"ok": False, "error": "Недопустимый источник запроса."}, status=403)
+    if request.method == "OPTIONS":
+        response = web.Response(status=204)
+    else:
+        response = await handler(request)
+    if origin and origin == allowed_origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Telegram-Init-Data"
+        response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
+async def _mini_app_api(request: web.Request) -> web.Response:
+    try:
+        user = _verify_mini_app_init_data(request.headers.get("X-Telegram-Init-Data", ""), request.app["bot_token"])
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Некорректное тело запроса Mini App")
+        raw_chat_id = payload.pop("chat_id", None)
+        chat_id = int(raw_chat_id)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
+    try:
+        message = _MiniAppMessage(request.app["bot"], chat_id, user, payload)
+        await mini_app_data(message)
+    except Exception:
+        logging.exception("Ошибка обработки команды Mini App через API")
+        return web.json_response({"ok": False, "error": "Команда не обработана сервером."}, status=500)
+    return web.json_response({"ok": True, "message": "Команда передана боту. Ответ появится в чате."})
+
+
+async def _start_mini_app_api(bot: Bot, bot_token: str):
+    """Запускает локальный API, если для Mini App задан публичный HTTPS-адрес."""
+
+    if not _mini_app_api_url():
+        return None
+    app = web.Application(client_max_size=128 * 1024, middlewares=[_mini_app_cors_middleware])
+    app["bot"] = bot
+    app["bot_token"] = bot_token
+    app.router.add_post(MINI_APP_API_PATH, _mini_app_api)
+    app.router.add_options(MINI_APP_API_PATH, _mini_app_api)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(
+        runner,
+        host=os.getenv("MINI_APP_API_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        port=_positive_env_int("MINI_APP_API_PORT", 8081),
+    )
+    try:
+        await site.start()
+    except Exception:
+        await runner.cleanup()
+        raise
+    logging.info("Mini App API запущен на %s:%s", site._host, site._port)
+    return runner
+
+
 async def _open_check_mini_app(message: Message) -> None:
-    keyboard = _mini_app_keyboard(chat_id=message.chat.id)
+    keyboard = (
+        _mini_app_reply_keyboard(chat_id=message.chat.id)
+        if message.chat.type == "private"
+        else _mini_app_keyboard(chat_id=message.chat.id)
+    )
     if keyboard is None:
         await message.answer("Mini App пока не опубликован: задайте MINI_APP_URL.")
         return
@@ -1900,12 +2060,15 @@ async def _run() -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
+    mini_app_api_runner = await _start_mini_app_api(bot, token)
     monitor_task = asyncio.create_task(_monitor_loop(bot, _positive_env_int("MONITOR_INTERVAL_SECONDS", 86400)))
     try:
         await dispatcher.start_polling(bot)
     finally:
         monitor_task.cancel()
         await asyncio.gather(monitor_task, return_exceptions=True)
+        if mini_app_api_runner:
+            await mini_app_api_runner.cleanup()
         await bot.session.close()
         if agent:
             await agent.close()
@@ -1932,4 +2095,3 @@ async def _run() -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     asyncio.run(_run())
-
