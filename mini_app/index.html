@@ -230,6 +230,8 @@
     const initChatId = tg?.initDataUnsafe?.chat?.id;
     const urlChatId = params.get('chat_id');
     const telegramChatId = initChatId || urlChatId;
+    const apiUrl = params.get('api_url');
+    const transport = params.get('transport') || 'api';
     const chatKey = telegramChatId || `private:${telegramUserId || 'anonymous'}`;
     const storageKey = `nalog:checked-companies:${chatKey}:${telegramUserId || 'anonymous'}`;
     const loadRows = () => {
@@ -291,7 +293,7 @@
         td.append(check, remove); tr.appendChild(td); body.appendChild(tr);
       });
     };
-    const send = (action, value) => {
+    const send = async (action, value) => {
       if (action !== 'share_list' && !value) return;
       if (action === 'check' || action === 'watch') rememberQuery(value, action === 'watch' ? 'добавлена' : 'проверялась');
       const payload = { action };
@@ -299,10 +301,33 @@
       else if (action === 'set_email') payload.email = value;
       else if (action === 'share_list') payload.queries = rows.map(row => row.query);
       else if (action !== 'remove_email') payload.job_id = value;
-      tg?.sendData(JSON.stringify(payload));
-      document.querySelector('#result').textContent = action === 'captcha_done'
+      const confirmationText = action === 'captcha_done'
         ? 'Подтверждение передано боту. Очередь продолжится после ответа ФНС.'
         : 'Команда передана боту. Ответ появится в чате.';
+      if (transport === 'web_app_data' && tg?.sendData) {
+        tg.sendData(JSON.stringify(payload));
+        document.querySelector('#result').textContent = confirmationText;
+        return;
+      }
+      if (!apiUrl || !telegramChatId || !tg?.initData) {
+        document.querySelector('#result').textContent = 'Не удалось связаться с ботом: API Mini App не настроен.';
+        return;
+      }
+      try {
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Telegram-Init-Data': tg.initData,
+          },
+          body: JSON.stringify({ ...payload, chat_id: telegramChatId }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.ok) throw new Error(result.error || 'сервер отклонил запрос');
+        document.querySelector('#result').textContent = result.message || confirmationText;
+      } catch (error) {
+        document.querySelector('#result').textContent = `Не удалось передать команду боту: ${error.message}`;
+      }
     };
     document.querySelector('#check').onclick = () => {
       const query = document.querySelector('#query').value.trim();
@@ -350,4 +375,3 @@
   </script>
 </body>
 </html>
-
