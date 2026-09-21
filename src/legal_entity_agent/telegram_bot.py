@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -33,7 +34,7 @@ from .bulk_import import parse_upload
 from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
 from .deep_check import AtomnoFnsCheckAdapter
-from .excel_export import build_check_workbook, row_from_assessment, row_from_error
+from .excel_export import ExcelCheckRow, build_check_workbook, row_from_assessment, row_from_error
 from .fns_client import FnsBlockedError, FnsEgrulClient, FnsError, FnsNotFoundError, FnsTransientError
 from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
@@ -44,6 +45,7 @@ from .notifications import EmailSubscriptionStore, SmtpConfig, normalize_email, 
 from .permissions import ChatAccessStore, is_main_admin, normalize_tag
 from .reactions import ReactionSettings
 from .render import format_assessment
+from .shared_lists import SharedListStore
 from .watchlist import WatchStore
 
 router = Router()
@@ -54,6 +56,7 @@ history_store: HistoryStore | None = None
 license_store: LicenseStore | None = None
 audit_store: AuditStore | None = None
 watch_store: WatchStore | None = None
+shared_list_store: SharedListStore | None = None
 notification_store: EmailSubscriptionStore | None = None
 smtp_config = SmtpConfig(host="")
 batch_review_store: BatchReviewStore | None = None
@@ -61,6 +64,7 @@ chat_skill: ChatSkill | None = None
 reaction_settings = ReactionSettings()
 batch_jobs = BatchJobRegistry()
 batch_tasks: dict[str, asyncio.Task[None]] = {}
+MAX_SHARED_MINI_APP_URL_LENGTH = 3500
 
 BOT_MENU_ACTIONS = frozenset(
     {
@@ -79,8 +83,7 @@ BOT_MENU_ACTIONS = frozenset(
 def _audit(message: Message, action: str, details: str = "") -> None:
     if audit_store and message.from_user:
         try:
-            audit_store.record(chat_id=message.chat.id, actor_id=message.from_user.id,
-                               action=action, details=details)
+            audit_store.record(chat_id=message.chat.id, actor_id=message.from_user.id, action=action, details=details)
         except Exception:
             logging.exception("Не удалось записать действие в аудит")
 
@@ -91,24 +94,53 @@ def _mini_app_url() -> str:
     return url if url.startswith("https://") else ""
 
 
-def _mini_app_link(*, job_id: str | None = None) -> str:
-    """Возвращает ссылку Mini App с непрозрачным ID задания, если он задан."""
+def _mini_app_link(
+    *,
+    job_id: str | None = None,
+    chat_id: int | str | None = None,
+    shared_queries: list[str] | None = None,
+) -> str:
+    """Возвращает ссылку Mini App с контекстом задания и чата, если он задан."""
 
     url = _mini_app_url()
-    if not url or not job_id:
+    if not url:
+        return url
+    params: list[str] = []
+    if job_id:
+        params.append(f"job_id={quote(job_id, safe='')}")
+    if chat_id is not None:
+        params.append(f"chat_id={quote(str(chat_id), safe='')}")
+    if shared_queries:
+        encoded = json.dumps(shared_queries, ensure_ascii=False, separators=(",", ":"))
+        params.append(f"shared_queries={quote(encoded, safe='')}")
+    if not params:
         return url
     separator = "&" if "?" in url else "?"
-    return f"{url}{separator}job_id={quote(job_id, safe='')}"
+    return f"{url}{separator}{'&'.join(params)}"
 
 
-def _mini_app_keyboard(*, job_id: str | None = None) -> InlineKeyboardMarkup | None:
-    url = _mini_app_link(job_id=job_id)
+def _mini_app_keyboard(
+    *,
+    job_id: str | None = None,
+    chat_id: int | str | None = None,
+    shared_queries: list[str] | None = None,
+) -> InlineKeyboardMarkup | None:
+    url = _mini_app_link(job_id=job_id, chat_id=chat_id, shared_queries=shared_queries)
     if not url:
         return None
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть Mini App", web_app=WebAppInfo(url=url))]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="Открыть Mini App", web_app=WebAppInfo(url=url))]]
+    )
+
+
+async def _open_check_mini_app(message: Message) -> None:
+    keyboard = _mini_app_keyboard(chat_id=message.chat.id)
+    if keyboard is None:
+        await message.answer("Mini App пока не опубликован: задайте MINI_APP_URL.")
+        return
+    await message.answer(
+        "Откройте MiniApp и введите реквизиты компании для проверки:",
+        reply_markup=keyboard,
     )
 
 
@@ -177,12 +209,7 @@ async def _react_to_message(message: Message, bot: Bot) -> None:
     например, в чате может быть запрещено право бота реагировать на сообщения.
     """
 
-    if (
-        not reaction_settings.enabled
-        or not message.from_user
-        or message.from_user.is_bot
-        or not _allowed(message)
-    ):
+    if not reaction_settings.enabled or not message.from_user or message.from_user.is_bot or not _allowed(message):
         return
     reaction_label = reaction_settings.custom_emoji_id or reaction_settings.choose_emoji()
     try:
@@ -226,10 +253,10 @@ def help_text() -> str:
         "/help — показать этот список команд.\n"
         "/menu — показать постоянное меню быстрых действий.\n"
         "/skills — рассказать, что умеет агент.\n"
-        "/check реквизиты — проверить юридическое лицо по данным ФНС.\n"
-        "  Можно указать ИНН, ОГРН, КПП, название, адрес или несколько реквизитов.\n"
+        "/check — открыть MiniApp для проверки компании.\n"
+        "  Реквизиты вводятся внутри MiniApp: ИНН, ОГРН, КПП, название или адрес.\n"
         "  После проверки бот отправляет текст и Excel-файл с четырьмя столбцами.\n"
-        "  Можно написать свободно: «Налог, проверь компанию с ИНН 7707083893».\n"
+        "  Для запуска проверки напишите: «Налог, проверка».\n"
         "/history — показать ранее выполненные проверки в текущем чате.\n"
         "/history ID — показать сохранённый итог конкретной проверки.\n"
         "/why ID — показать результат, источники, время и покрытие проверки.\n"
@@ -279,14 +306,14 @@ def skills_text() -> str:
         "👥 Доступы — проверка доверенных пользователей, роли и отдельные права в каждом чате.\n"
         "📋 Аудит — журнал административных действий и операций.\n"
         "🖥 Mini App — таблица компаний, запуск проверки и добавление в мониторинг.\n\n"
-        "Для команд используйте /help. Пример запроса:\n"
-        "«Налог, проверь компанию с ИНН 7707083893»."
+        "Для команд используйте /help. Запуск проверки:\n"
+        "«Налог, проверка»."
     )
 
 
 @router.message(CommandStart())
 async def start(message: Message, bot: Bot) -> None:
-    url = _mini_app_url()
+    url = _mini_app_link(chat_id=message.chat.id)
     if url:
         try:
             await bot.set_chat_menu_button(
@@ -296,8 +323,8 @@ async def start(message: Message, bot: Bot) -> None:
         except Exception:
             logging.warning("Не удалось установить кнопку Mini App для чата %s", message.chat.id, exc_info=True)
     await message.answer(
-        "Агент готов. Для проверки используйте /check и реквизиты юридического лица.\n"
-        "Можно обратиться свободной фразой: «Налог, проверь компанию с ИНН 7707083893».\n"
+        "Агент готов. Для начала проверки напишите: «Налог, проверка».\n"
+        "Реквизиты компании вводятся внутри MiniApp.\n"
         "После ответа можно поставить оценку кнопками обратной связи.\n"
         "Для полного списка команд используйте /help.",
         reply_markup=bot_menu_keyboard(),
@@ -321,7 +348,7 @@ async def menu_command(message: Message) -> None:
 
 @router.message(Command("app"))
 async def app_command(message: Message, bot: Bot) -> None:
-    url = _mini_app_url()
+    url = _mini_app_link(chat_id=message.chat.id)
     if not url:
         await message.answer("Mini App пока не опубликован: задайте MINI_APP_URL.")
         return
@@ -334,9 +361,13 @@ async def app_command(message: Message, bot: Bot) -> None:
         logging.warning("Не удалось установить кнопку Mini App для чата %s", message.chat.id, exc_info=True)
     await message.answer(
         "Откройте панель проверки:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Открыть Mini App", web_app=WebAppInfo(url=url)),
-        ]]),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Открыть Mini App", web_app=WebAppInfo(url=url)),
+                ]
+            ]
+        ),
     )
 
 
@@ -369,10 +400,10 @@ async def check(message: Message, command: CommandObject) -> None:
     if command.args and command.args.strip().casefold() == "all":
         await check_all(message)
         return
-    await _run_check(message, command.args or "")
+    await _open_check_mini_app(message)
 
 
-async def _run_check(message: Message, raw_query: str) -> None:
+async def _run_check(message: Message, raw_query: str, *, suppress_blocked_error: bool = False) -> None:
     if not _can_check(message):
         await message.answer("У вас нет разрешения на выполнение этой команды.")
         return
@@ -382,7 +413,7 @@ async def _run_check(message: Message, raw_query: str) -> None:
     if agent is None:
         await message.answer("Проверка сейчас недоступна: агент не настроен.")
         return
-    mini_app_keyboard = _mini_app_keyboard()
+    mini_app_keyboard = _mini_app_keyboard(chat_id=message.chat.id)
     if mini_app_keyboard:
         await message.answer(
             "Для проверки и дальнейшего управления результатом можно открыть Mini App:",
@@ -397,12 +428,11 @@ async def _run_check(message: Message, raw_query: str) -> None:
     except FnsError as exc:
         if learning_store and message.from_user and query is not None:
             try:
-                learning_store.record_failure(
-                    actor_id=str(message.from_user.id), identifier=query, error=str(exc)
-                )
+                learning_store.record_failure(actor_id=str(message.from_user.id), identifier=query, error=str(exc))
             except Exception:
                 logging.exception("Не удалось сохранить ошибку проверки в журнал обучения")
-        await message.answer(f"Проверка ФНС не выполнена: {exc}")
+        if not (suppress_blocked_error and isinstance(exc, FnsBlockedError)):
+            await message.answer(f"Проверка ФНС не выполнена: {exc}")
     except Exception:
         logging.exception("Непредвиденная ошибка одиночной проверки")
         if learning_store and message.from_user and query is not None:
@@ -516,9 +546,7 @@ async def feedback_command(message: Message, command: CommandObject) -> None:
 def _history_line(entry: HistoryEntry) -> str:
     title = entry.name or entry.query_text
     title = title if len(title) <= 70 else title[:67] + "..."
-    identifiers = " / ".join(
-        value for value in (entry.inn, entry.kpp, entry.ogrn) if value
-    )
+    identifiers = " / ".join(value for value in (entry.inn, entry.kpp, entry.ogrn) if value)
     state = {
         "present": "есть отметка о недостоверности",
         "absent": "отметка о недостоверности отсутствует",
@@ -526,6 +554,73 @@ def _history_line(entry: HistoryEntry) -> str:
     }.get(entry.inaccuracy_state, entry.inaccuracy_state)
     details = f"; {identifiers}" if identifiers else ""
     return f"{entry.event_id} — {entry.created_at:%d.%m.%Y %H:%M}; {title}{details}; {state}"
+
+
+def _history_excel_row(entry: HistoryEntry) -> ExcelCheckRow:
+    identifiers = "; ".join(
+        value
+        for value in (
+            f"ИНН: {entry.inn}" if entry.inn else None,
+            f"ОГРН: {entry.ogrn}" if entry.ogrn else None,
+            f"КПП: {entry.kpp}" if entry.kpp else None,
+            f"Запрос: {entry.query_text}" if entry.query_text else None,
+        )
+        if value
+    )
+    inaccuracy = {
+        "present": "Да",
+        "absent": "Нет",
+        "not_reported": "Не распознано",
+    }.get(entry.inaccuracy_state, entry.inaccuracy_state)
+    return ExcelCheckRow(
+        name=entry.name or "—",
+        lookup=identifiers or "—",
+        inaccuracy=inaccuracy,
+    )
+
+
+async def _export_mini_app_excel(message: Message, raw_queries: list[str]) -> None:
+    if not _allowed(message) or not message.from_user or history_store is None:
+        await message.answer("У вас нет разрешения выгружать результаты проверок.")
+        return
+    queries = list(dict.fromkeys(query.strip() for query in raw_queries if query.strip()))
+    if not queries:
+        await message.answer("Список компаний пуст.")
+        return
+    if len(queries) > 100:
+        await message.answer("За один раз можно выгрузить не более 100 компаний.")
+        return
+    entries = history_store.list_for(
+        chat_id=message.chat.id,
+        actor_id=message.from_user.id,
+        is_root=False,
+        limit=100,
+    )
+    latest_by_query: dict[str, HistoryEntry] = {}
+    for entry in entries:
+        key = " ".join(entry.query_text.split()).casefold()
+        latest_by_query.setdefault(key, entry)
+    rows: list[ExcelCheckRow] = []
+    for query in queries:
+        key = " ".join(query.split()).casefold()
+        rows.append(
+            _history_excel_row(latest_by_query[key])
+            if key in latest_by_query
+            else row_from_error(query, "результат проверки отсутствует")
+        )
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    try:
+        await message.answer_document(
+            BufferedInputFile(
+                build_check_workbook(rows),
+                filename=f"mini_app_checks_{timestamp}.xlsx",
+            ),
+            caption="Результаты компаний из списка MiniApp в формате Excel.",
+        )
+        _audit(message, "mini_app_excel_export", f"count={len(queries)}")
+    except Exception:
+        logging.exception("Не удалось отправить Excel-выгрузку MiniApp")
+        await message.answer("Не удалось сформировать Excel-файл. Попробуйте ещё раз.")
 
 
 @router.message(Command("history"))
@@ -568,8 +663,9 @@ async def why_command(message: Message, command: CommandObject) -> None:
     if not event_id:
         await message.answer("Формат: /why ID проверки. ID можно найти в /history.")
         return
-    entry = history_store.get_for(event_id=event_id, chat_id=message.chat.id,
-                                 actor_id=message.from_user.id, is_root=_is_root(message))
+    entry = history_store.get_for(
+        event_id=event_id, chat_id=message.chat.id, actor_id=message.from_user.id, is_root=_is_root(message)
+    )
     if entry is None:
         await message.answer("Проверка не найдена или недоступна.")
         return
@@ -647,8 +743,9 @@ async def license_add_command(message: Message, command: CommandObject) -> None:
     except ValueError:
         await message.answer("Дата должна быть в формате ДД.ММ.ГГГГ.")
         return
-    record = new_license(license_id=parts[0], inn=parts[1], expires_at=expires,
-                         notes=parts[3] if len(parts) == 4 else None)
+    record = new_license(
+        license_id=parts[0], inn=parts[1], expires_at=expires, notes=parts[3] if len(parts) == 4 else None
+    )
     license_store.upsert(record)
     _audit(message, "license_add", "license_record_created")
     await message.answer(f"Лицензия {parts[0]} сохранена до {expires:%d.%m.%Y}.")
@@ -660,7 +757,9 @@ async def license_list_command(message: Message) -> None:
         await message.answer("У вас нет разрешения на просмотр лицензий.")
         return
     records = license_store.all()
-    await message.answer("Лицензий в реестре нет." if not records else "\n".join(_license_line(item) for item in records))
+    await message.answer(
+        "Лицензий в реестре нет." if not records else "\n".join(_license_line(item) for item in records)
+    )
 
 
 @router.message(Command("license_monitor"))
@@ -689,9 +788,10 @@ async def audit_command(message: Message) -> None:
     if not rows:
         await message.answer("Журнал действий пуст.")
         return
-    await message.answer("Журнал действий:\n" + "\n".join(
-        f"{row['created_at'][:19]} — {row['action']} — {row['details']}" for row in rows
-    ))
+    await message.answer(
+        "Журнал действий:\n"
+        + "\n".join(f"{row['created_at'][:19]} — {row['action']} — {row['details']}" for row in rows)
+    )
 
 
 @router.message(Command("watch"))
@@ -705,7 +805,9 @@ async def watch_command(message: Message, command: CommandObject) -> None:
         return
     watch_store.add(message.chat.id, query, message.from_user.id)
     _audit(message, "watch_added", "company_added")
-    await message.answer("Компания добавлена в список мониторинга. Периодический планировщик подключим после настройки интервала и канала уведомлений.")
+    await message.answer(
+        "Компания добавлена в список мониторинга. Периодический планировщик подключим после настройки интервала и канала уведомлений."
+    )
 
 
 @router.message(Command("unwatch"))
@@ -720,8 +822,9 @@ async def unwatch_command(message: Message, command: CommandObject) -> None:
     removed = watch_store.remove(message.chat.id, query)
     if removed:
         _audit(message, "watch_removed", "company_removed")
-    await message.answer("Компания удалена из списка мониторинга." if removed
-                         else "Такой компании нет в списке мониторинга.")
+    await message.answer(
+        "Компания удалена из списка мониторинга." if removed else "Такой компании нет в списке мониторинга."
+    )
 
 
 @router.message(Command("watched"))
@@ -968,19 +1071,12 @@ async def _run_batch_job(job: BatchJob, message: Message) -> None:
             job.index += 1
 
         if job.state is BatchJobState.CANCELLED:
-            remaining = job.queries[job.index:]
-            rows.extend(
-                row_from_error(query.value, "проверка отменена пользователем")
-                for query in remaining
-            )
-            await message.answer(
-                f"⏹ Пакетная проверка отменена. Обработано: {job.index}/{len(job.queries)}."
-            )
+            remaining = job.queries[job.index :]
+            rows.extend(row_from_error(query.value, "проверка отменена пользователем") for query in remaining)
+            await message.answer(f"⏹ Пакетная проверка отменена. Обработано: {job.index}/{len(job.queries)}.")
         else:
             job.complete()
-            await message.answer(
-                f"✅ Массовая проверка завершена: успешно — {succeeded}, с ошибкой — {failed}."
-            )
+            await message.answer(f"✅ Массовая проверка завершена: успешно — {succeeded}, с ошибкой — {failed}.")
 
         _audit(
             message,
@@ -1031,7 +1127,7 @@ async def _start_batch_job(message: Message, queries: list[SearchQuery], *, sour
     await message.answer(
         f"Запускаю последовательную проверку {len(queries)} компаний. "
         f"Задание: {job.job_id}. При CAPTCHA очередь остановится и продолжится после вашего подтверждения.",
-        reply_markup=_mini_app_keyboard(job_id=job.job_id),
+        reply_markup=_mini_app_keyboard(job_id=job.job_id, chat_id=message.chat.id),
     )
     task = asyncio.create_task(_run_batch_job(job, message))
     batch_tasks[job.job_id] = task
@@ -1070,9 +1166,7 @@ async def batch_captcha_resume(callback: CallbackQuery) -> None:
         return
     if job.resume_after_captcha():
         await callback.answer("Очередь возобновлена.")
-        await callback.message.answer(
-            f"▶️ Повторяю проверку компании {job.index + 1}/{len(job.queries)}."
-        )
+        await callback.message.answer(f"▶️ Повторяю проверку компании {job.index + 1}/{len(job.queries)}.")
     else:
         await callback.answer("Это задание уже не ожидает CAPTCHA.", show_alert=True)
 
@@ -1227,6 +1321,42 @@ async def mini_app_data(message: Message) -> None:
         await message.answer("Mini App передал некорректные данные.")
         return
     action = payload.get("action")
+    if action == "export_excel":
+        raw_queries = payload.get("queries")
+        if not isinstance(raw_queries, list) or not all(isinstance(query, str) for query in raw_queries):
+            await message.answer("Mini App передал некорректный список компаний.")
+            return
+        await _export_mini_app_excel(message, raw_queries)
+        return
+    if action == "share_list":
+        if not _can_check(message) or not message.from_user or shared_list_store is None:
+            await message.answer("У вас нет разрешения делиться списком компаний.")
+            return
+        raw_queries = payload.get("queries")
+        if not isinstance(raw_queries, list) or not all(isinstance(query, str) for query in raw_queries):
+            await message.answer("Mini App передал некорректный список компаний.")
+            return
+        try:
+            shared = shared_list_store.create(message.chat.id, message.from_user.id, raw_queries)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        _audit(message, "company_list_shared", f"count={len(shared.queries)}")
+        await message.answer(
+            f"Список из {len(shared.queries)} компаний подготовлен. "
+            "В этом чате другой пользователь может нажать кнопку и добавить его себе.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="Добавить список себе",
+                            callback_data=f"shared_list:{shared.share_id}",
+                        )
+                    ]
+                ]
+            ),
+        )
+        return
     if action in {"set_email", "remove_email"}:
         if not message.from_user or not _allowed(message) or notification_store is None:
             await message.answer("У вас нет разрешения на настройку email-уведомлений.")
@@ -1250,9 +1380,7 @@ async def mini_app_data(message: Message) -> None:
         notification_store.set(message.chat.id, recipient, message.from_user.id)
         _audit(message, "email_notifications_enabled", "email_saved")
         if smtp_config.configured:
-            await message.answer(
-                f"Уведомления включены. Письма будут отправляться на {recipient}."
-            )
+            await message.answer(f"Уведомления включены. Письма будут отправляться на {recipient}.")
         else:
             await message.answer(
                 f"Уведомления включены для адреса {recipient}, но отправка пока не настроена на сервере. "
@@ -1300,11 +1428,45 @@ async def mini_app_data(message: Message) -> None:
             if removed:
                 _audit(message, "watch_removed", "company_removed_from_mini_app")
             await message.answer(
-                "Компания удалена из мониторинга." if removed
-                else "Компания не найдена в мониторинге."
+                "Компания удалена из мониторинга." if removed else "Компания не найдена в мониторинге."
             )
         return
-    await _run_check(message, payload["query"])
+    await _run_check(message, payload["query"], suppress_blocked_error=True)
+
+
+@router.callback_query(F.data.startswith("shared_list:"))
+async def shared_list_callback(callback: CallbackQuery) -> None:
+    if not callback.message or not callback.from_user or shared_list_store is None:
+        await callback.answer("Не удалось определить чат или список.", show_alert=True)
+        return
+    share_id = (callback.data or "").split(":", 1)[1]
+    shared = shared_list_store.get(share_id, callback.message.chat.id)
+    if shared is None:
+        await callback.answer("Список устарел или относится к другому чату.", show_alert=True)
+        return
+    if str(callback.from_user.id) == shared.owner_id:
+        await callback.answer("Этот список уже принадлежит вам.", show_alert=True)
+        return
+    if not _can_check_user(callback.message.chat.id, callback.from_user):
+        await callback.answer("У вас нет разрешения на проверки в этом чате.", show_alert=True)
+        return
+    shared_queries = list(shared.queries)
+    shared_url = _mini_app_link(chat_id=callback.message.chat.id, shared_queries=shared_queries)
+    if len(shared_url) > MAX_SHARED_MINI_APP_URL_LENGTH:
+        await callback.answer(
+            "Список слишком большой для передачи одной кнопкой. Удалите лишние компании и повторите попытку.",
+            show_alert=True,
+        )
+        return
+    keyboard = _mini_app_keyboard(chat_id=callback.message.chat.id, shared_queries=shared_queries)
+    if keyboard is None:
+        await callback.answer("Mini App пока не опубликован.", show_alert=True)
+        return
+    await callback.answer("Список подготовлен для добавления в ваш MiniApp.")
+    await callback.message.answer(
+        f"Нажмите кнопку, чтобы добавить себе {len(shared.queries)} компаний.",
+        reply_markup=keyboard,
+    )
 
 
 @router.message(Command("learning_queue"))
@@ -1437,11 +1599,7 @@ async def _handle_menu_action(message: Message, text: str) -> bool:
     # кнопки. Убираем его, чтобы нажатие не зависело от конкретного клиента.
     action = text.strip().replace("\ufe0e", "").replace("\ufe0f", "")
     if action == "🔎 Проверить компанию":
-        await message.answer(
-            "Введите реквизиты компании одним сообщением, например:\n"
-            "/check ИНН 7707083893\n\n"
-            "Или напишите: «Налог, проверь компанию с ИНН …»."
-        )
+        await _open_check_mini_app(message)
     elif action == "📋 История проверок":
         await _show_history(message)
     elif action == "📊 Проверить все":
@@ -1487,14 +1645,15 @@ async def natural_language(message: Message) -> None:
     if request.intent is NaturalIntent.HELP:
         await message.answer(
             "Я — Налог, агент проверки юридических лиц. "
-            "Обратитесь ко мне, например: «Налог, проверь компанию с ИНН 7707083893».\n\n"
-            + skills_text()
+            "Обратитесь ко мне, например: «Налог, проверь компанию с ИНН 7707083893».\n\n" + skills_text()
         )
     elif request.intent is NaturalIntent.GREETING:
         await message.answer(
             "Здравствуйте. Я готов проверить юридическое лицо по ИНН, ОГРН, КПП, "
-            "названию, адресу или другим данным. Например: «Налог, проверь компанию с ИНН 7707083893»."
+            "названию, адресу или другим данным внутри MiniApp. Напишите: «Налог, проверка»."
         )
+    elif request.intent is NaturalIntent.OPEN_CHECK_APP:
+        await _open_check_mini_app(message)
     elif request.intent is NaturalIntent.CHECK:
         await _run_check(message, request.query_text)
     elif request.intent is NaturalIntent.LICENSE:
@@ -1512,8 +1671,7 @@ async def natural_language(message: Message) -> None:
             return
         if chat_skill is None:
             await message.answer(
-                "Разговорный режим пока не настроен. "
-                "Проверки доступны через /check или фразу «Налог, проверь компанию с ИНН …»."
+                "Разговорный режим пока не настроен. Проверка доступна через MiniApp: напишите «Налог, проверка»."
             )
             return
         try:
@@ -1551,15 +1709,22 @@ async def _monitor_loop(bot: Bot, interval_seconds: int) -> None:
                                 if attempt == 2:
                                     logging.warning("Мониторинг пропущен для %s", raw_query, exc_info=True)
                                 else:
-                                    await asyncio.sleep(2 ** attempt)
+                                    await asyncio.sleep(2**attempt)
                         if result is None:
                             continue
                     record = result.record
-                    snapshot = "|".join(str(item) for item in (
-                        record.name, record.inn, record.ogrn, record.kpp,
-                        record.status, record.inaccuracy_state.value,
-                        ",".join(record.inaccuracy_markers),
-                    ))
+                    snapshot = "|".join(
+                        str(item)
+                        for item in (
+                            record.name,
+                            record.inn,
+                            record.ogrn,
+                            record.kpp,
+                            record.status,
+                            record.inaccuracy_state.value,
+                            ",".join(record.inaccuracy_markers),
+                        )
+                    )
                     previous_digest, previous_state = watch_store.snapshot_state(chat_id, raw_query)
                     current_state = record.inaccuracy_state.value
                     if watch_store.update_snapshot_with_state(
@@ -1622,8 +1787,7 @@ async def _monitor_loop(bot: Bot, interval_seconds: int) -> None:
                         for chat_id, raw_query, _ in watch_store.entries():
                             if license_record.inn not in raw_query:
                                 continue
-                            key = (str(chat_id), license_record.license_id,
-                                   str(license_record.expires_at), str(days))
+                            key = (str(chat_id), license_record.license_id, str(license_record.expires_at), str(days))
                             if key in notified_licenses:
                                 continue
                             notified_licenses.add(key)
@@ -1665,14 +1829,21 @@ def _telegram_proxy() -> str | None:
     parsed = urlparse(value)
     if parsed.scheme.casefold() not in {"http", "https", "socks5", "socks5h"} or not parsed.hostname:
         raise RuntimeError(
-            "TELEGRAM_PROXY должен быть URL HTTPS/HTTP или SOCKS5-прокси, например "
-            "socks5://user:password@host:1080."
+            "TELEGRAM_PROXY должен быть URL HTTPS/HTTP или SOCKS5-прокси, например socks5://user:password@host:1080."
         )
     return value
 
 
 async def _run() -> None:
-    global agent, access_store, learning_store, history_store, license_store, audit_store, watch_store
+    global \
+        agent, \
+        access_store, \
+        learning_store, \
+        history_store, \
+        license_store, \
+        audit_store, \
+        watch_store, \
+        shared_list_store
     global notification_store, smtp_config, batch_review_store, chat_skill
     global reaction_settings
     load_dotenv()
@@ -1681,9 +1852,7 @@ async def _run() -> None:
         raise RuntimeError("Не задан BOT_TOKEN в .env")
     hash_salt = os.getenv("LEARNING_HASH_SALT", "").strip()
     if not hash_salt:
-        raise RuntimeError(
-            "Не задан LEARNING_HASH_SALT: укажите стабильную случайную соль для защиты идентификаторов."
-        )
+        raise RuntimeError("Не задан LEARNING_HASH_SALT: укажите стабильную случайную соль для защиты идентификаторов.")
     access_store = ChatAccessStore(
         os.getenv("ACCESS_DB_PATH", "data/access.sqlite3"),
     )
@@ -1710,9 +1879,8 @@ async def _run() -> None:
     license_store = LicenseStore(os.getenv("LICENSE_DB_PATH", "data/licenses.sqlite3"))
     audit_store = AuditStore(os.getenv("AUDIT_DB_PATH", "data/audit.sqlite3"))
     watch_store = WatchStore(os.getenv("WATCH_DB_PATH", "data/watchlist.sqlite3"))
-    notification_store = EmailSubscriptionStore(
-        os.getenv("NOTIFICATION_DB_PATH", "data/notifications.sqlite3")
-    )
+    shared_list_store = SharedListStore(os.getenv("SHARED_LIST_DB_PATH", "data/shared_lists.sqlite3"))
+    notification_store = EmailSubscriptionStore(os.getenv("NOTIFICATION_DB_PATH", "data/notifications.sqlite3"))
     smtp_config = _smtp_config_from_env()
     batch_review_store = BatchReviewStore(
         os.getenv("BATCH_REVIEW_DB_PATH", "data/batch_review.sqlite3"),
@@ -1732,9 +1900,7 @@ async def _run() -> None:
     dispatcher = Dispatcher()
     dispatcher.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
-    monitor_task = asyncio.create_task(
-        _monitor_loop(bot, _positive_env_int("MONITOR_INTERVAL_SECONDS", 86400))
-    )
+    monitor_task = asyncio.create_task(_monitor_loop(bot, _positive_env_int("MONITOR_INTERVAL_SECONDS", 86400)))
     try:
         await dispatcher.start_polling(bot)
     finally:
@@ -1755,6 +1921,8 @@ async def _run() -> None:
             audit_store.close()
         if watch_store:
             watch_store.close()
+        if shared_list_store:
+            shared_list_store.close()
         if notification_store:
             notification_store.close()
         if batch_review_store:
@@ -1764,3 +1932,4 @@ async def _run() -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     asyncio.run(_run())
+
