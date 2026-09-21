@@ -10,6 +10,7 @@ from enum import StrEnum
 class NaturalIntent(StrEnum):
     HELP = "help"
     GREETING = "greeting"
+    OPEN_CHECK_APP = "open_check_app"
     CHECK = "check"
     CHECK_ALL = "check_all"
     HISTORY = "history"
@@ -94,13 +95,19 @@ def parse_natural_request(text: str) -> NaturalRequest | None:
     lowered = body.casefold()
     if not body:
         return NaturalRequest(NaturalIntent.HELP)
-    if any(marker in lowered for marker in ("помоги", "что ты умеешь", "что умеешь", "навык", "возможност", "скилл", "справк", "команд")):
+    if any(
+        marker in lowered
+        for marker in ("помоги", "что ты умеешь", "что умеешь", "навык", "возможност", "скилл", "справк", "команд")
+    ):
         return NaturalRequest(NaturalIntent.HELP)
     if re.match(
         r"(?iu)^(?:привет|здравствуй|добрый\s+день|доброе\s+утро|добрый\s+вечер)\b",
         body,
     ):
         return NaturalRequest(NaturalIntent.GREETING)
+
+    if lowered in {"проверка", "проверить", "проверку"}:
+        return NaturalRequest(NaturalIntent.OPEN_CHECK_APP)
 
     has_check_word = any(word in lowered for word in _CHECK_WORDS)
     if has_check_word and re.search(r"(?iu)\bвсе\b", body):
@@ -118,3 +125,4 @@ def parse_natural_request(text: str) -> NaturalRequest | None:
     if has_check_word or has_identifier:
         return NaturalRequest(NaturalIntent.CHECK, query_text)
     return NaturalRequest(NaturalIntent.UNKNOWN, body)
+
