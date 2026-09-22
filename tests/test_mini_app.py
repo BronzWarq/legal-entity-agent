@@ -43,8 +43,34 @@ def test_mini_app_link_carries_chat_context() -> None:
     assert "chat_id={quote(str(chat_id), safe='')}" in bot_source
 
 
-def test_private_chat_uses_reply_web_app_button_for_send_data(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_private_chat_uses_api_web_app_button_when_api_is_configured(monkeypatch) -> None:
     monkeypatch.setenv("MINI_APP_URL", "https://example.test/mini_app/")
+    monkeypatch.setenv("MINI_APP_API_URL", "https://api.example.test/mini-app-api")
+
+    answers: list[dict] = []
+
+    class Message:
+        chat = SimpleNamespace(id=12345, type="private")
+
+        async def answer(self, text, **kwargs):
+            answers.append({"text": text, **kwargs})
+
+    await telegram_bot._open_check_mini_app(Message())
+
+    assert len(answers) == 1
+    keyboard = answers[0]["reply_markup"]
+    assert keyboard is not None
+    assert keyboard.inline_keyboard[0][0].text == "Открыть Mini App"
+    assert (
+        keyboard.inline_keyboard[0][0].web_app.url
+        == "https://example.test/mini_app/?chat_id=12345&api_url=https%3A%2F%2Fapi.example.test%2Fmini-app-api&transport=api"
+    )
+
+
+def test_private_chat_keeps_legacy_reply_web_app_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("MINI_APP_URL", "https://example.test/mini_app/")
+    monkeypatch.delenv("MINI_APP_API_URL", raising=False)
 
     keyboard = telegram_bot._mini_app_reply_keyboard(chat_id=12345)
 
