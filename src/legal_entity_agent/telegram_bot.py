@@ -290,11 +290,15 @@ async def _start_mini_app_api(bot: Bot, bot_token: str):
 
 
 async def _open_check_mini_app(message: Message) -> None:
-    keyboard = (
-        _mini_app_reply_keyboard(chat_id=message.chat.id)
-        if message.chat.type == "private"
-        else _mini_app_keyboard(chat_id=message.chat.id)
-    )
+    # Используем HTTPS API и в личном чате, если он настроен. Это сохраняет
+    # Mini App открытым после отправки действия; старый sendData()-сценарий
+    # оставляем резервным вариантом для установок без API.
+    if _mini_app_api_url():
+        keyboard = _mini_app_keyboard(chat_id=message.chat.id)
+    elif message.chat.type == "private":
+        keyboard = _mini_app_reply_keyboard(chat_id=message.chat.id)
+    else:
+        keyboard = _mini_app_keyboard(chat_id=message.chat.id)
     if keyboard is None:
         await message.answer("Mini App пока не опубликован: задайте MINI_APP_URL.")
         return
