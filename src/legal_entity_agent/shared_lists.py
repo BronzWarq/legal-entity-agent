@@ -59,6 +59,9 @@ class SharedListStore:
             expires_at=now + self._ttl,
         )
         with self._lock, self._db:
+            # The list is temporary data; do not keep expired raw queries in
+            # the SQLite file merely because nobody opened the old link.
+            self._db.execute("DELETE FROM shared_lists WHERE expires_at <= ?", (now.isoformat(),))
             self._db.execute(
                 "INSERT INTO shared_lists(share_id, chat_id, owner_id, queries, created_at, expires_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -74,7 +77,10 @@ class SharedListStore:
         return shared
 
     def get(self, share_id: str, chat_id: int | str) -> SharedList | None:
+        now = datetime.now(UTC)
         with self._lock:
+            with self._db:
+                self._db.execute("DELETE FROM shared_lists WHERE expires_at <= ?", (now.isoformat(),))
             row = self._db.execute(
                 "SELECT * FROM shared_lists WHERE share_id=? AND chat_id=?",
                 (share_id, str(chat_id)),
@@ -82,10 +88,6 @@ class SharedListStore:
             if row is None:
                 return None
             expires_at = datetime.fromisoformat(row["expires_at"])
-            if expires_at <= datetime.now(UTC):
-                with self._db:
-                    self._db.execute("DELETE FROM shared_lists WHERE share_id=?", (share_id,))
-                return None
             queries = tuple(json.loads(row["queries"]))
             return SharedList(
                 share_id=row["share_id"],
@@ -98,4 +100,3 @@ class SharedListStore:
     def close(self) -> None:
         with self._lock:
             self._db.close()
-

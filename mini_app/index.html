@@ -222,7 +222,9 @@
     const initChatId = tg?.initDataUnsafe?.chat?.id;
     const urlChatId = params.get('chat_id');
     const telegramChatId = initChatId || urlChatId;
-    const launchContext = fragmentParams.get('context') || params.get('context');
+    // Telegram owns the URL fragment for tgWebAppData. Keep the server ticket
+    // in the query string and accept the fragment only for older links.
+    const launchContext = params.get('context') || fragmentParams.get('context');
     const sharedListId = params.get('shared_list_id');
     const apiUrl = params.get('api_url');
     const transport = params.get('transport') || 'api';
@@ -289,7 +291,8 @@
       });
     };
     const send = async (action, value) => {
-      if (action !== 'share_list' && !value) return;
+      const valueRequired = new Set(['check', 'watch', 'unwatch', 'set_email', 'import_shared_list', 'batch_cancel', 'batch_status']);
+      if (valueRequired.has(action) && !value) return;
       if (action === 'check' || action === 'watch') rememberQuery(value, action === 'watch' ? 'добавлена' : 'проверялась');
       const payload = { action };
       if (action === 'check' || action === 'watch' || action === 'unwatch') payload.query = value;
@@ -298,8 +301,16 @@
       else if (action === 'import_shared_list') payload.shared_list_id = value;
       else if (action !== 'remove_email') payload.job_id = value;
       const confirmationText = 'Команда передана боту. Ответ появится в чате.';
+      const serializedPayload = JSON.stringify(payload);
       if (transport === 'web_app_data' && tg?.sendData) {
-        tg.sendData(JSON.stringify(payload));
+        const payloadBytes = typeof TextEncoder === 'function'
+          ? new TextEncoder().encode(serializedPayload).length
+          : serializedPayload.length;
+        if (payloadBytes > 4096) {
+          document.querySelector('#result').textContent = 'Список слишком велик для резервного режима Telegram. Настройте Mini App API или сократите список.';
+          return null;
+        }
+        tg.sendData(serializedPayload);
         document.querySelector('#result').textContent = confirmationText;
         return null;
       }

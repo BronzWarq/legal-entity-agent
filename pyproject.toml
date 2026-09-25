@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "legal-entity-agent"
-version = "0.12.1"
+version = "0.12.2"
 description = "Агент для проверки сведений о юридических лицах по официальным сервисам ФНС"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,12 +13,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-bot = ["aiogram>=3.20,<4", "aiohttp-socks>=0.10,<1"]
+bot = ["aiogram>=3.20,<4", "aiohttp>=3.9,<4", "aiohttp-socks>=0.10,<1"]
 deep-check = ["atomno-mcp-fns-check>=0.1.12,<0.2"]
 test = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.24,<1",
     "aiogram>=3.20,<4",
+    "aiohttp>=3.9,<4",
 ]
 lint = ["ruff>=0.16,<0.17"]
 

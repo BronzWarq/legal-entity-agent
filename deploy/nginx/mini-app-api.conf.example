@@ -1,9 +1,9 @@
 # Рекомендуемый шаблон для api.bronzarena.club.
 #
-# Важно: директива limit_req_zone должна находиться внутри общего блока http{}
-# в /etc/nginx/nginx.conf или в подключаемом из него файле.
-#
-# limit_req_zone $binary_remote_addr zone=mini_app_api_by_ip:10m rate=30r/m;
+# Перед включением скопируйте mini-app-api-limit.conf.example в
+# /etc/nginx/conf.d/mini-app-api-limit.conf либо добавьте его директиву внутрь
+# общего блока http{} в /etc/nginx/nginx.conf. Без этого активная директива
+# limit_req ниже не будет работать.
 
 server {
     listen 80;

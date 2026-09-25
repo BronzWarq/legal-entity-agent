@@ -32,8 +32,23 @@ def test_expired_shared_list_is_removed() -> None:
         store._db.execute(
             "UPDATE shared_lists SET expires_at=? WHERE share_id=?",
             ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), shared.share_id),
-        )
+    )
 
     assert store.get(shared.share_id, 10) is None
     store.close()
 
+
+def test_create_purges_expired_raw_lists() -> None:
+    store = SharedListStore(":memory:")
+    expired = store.create(10, 20, ["старый закрытый запрос"])
+    with store._db:
+        store._db.execute(
+            "UPDATE shared_lists SET expires_at=? WHERE share_id=?",
+            ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), expired.share_id),
+        )
+
+    fresh = store.create(10, 21, ["новый запрос"])
+
+    assert store.get(expired.share_id, 10) is None
+    assert store.get(fresh.share_id, 10) == fresh
+    store.close()

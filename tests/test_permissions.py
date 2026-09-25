@@ -45,3 +45,25 @@ def test_revoke_by_reply_user_id_survives_username_change(tmp_path) -> None:
     assert store.revoke(1, username="new_name", user_id=2, revoked_by=1)
     assert not store.is_allowed(1, user_id=2, username="new_name")
     store.close()
+
+
+def test_reassigned_username_cannot_use_another_users_grant(tmp_path) -> None:
+    store = ChatAccessStore(tmp_path / "access.sqlite3")
+    assert store.grant(1, username="alice", user_id=2, granted_by=1)
+
+    assert not store.is_allowed(1, user_id=3, username="alice")
+    assert store.role_for(1, user_id=3, username="alice") is None
+    assert store.is_allowed(1, user_id=2, username="alice_renamed")
+    assert not store.revoke(1, username="alice", user_id=3, revoked_by=1)
+    assert store.is_allowed(1, user_id=2, username="alice_renamed")
+    store.close()
+
+
+def test_username_only_grant_does_not_clear_existing_user_binding(tmp_path) -> None:
+    store = ChatAccessStore(tmp_path / "access.sqlite3")
+    assert store.grant(1, username="alice", user_id=2, granted_by=1)
+    assert not store.grant(1, username="alice", user_id=None, granted_by=1, role="manager")
+
+    assert store.role_for(1, user_id=2, username="alice") == "checker"
+    assert not store.is_allowed(1, user_id=3, username="alice")
+    store.close()

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from datetime import datetime
 
 from legal_entity_agent.learning import FeedbackLabel, LearningStore
@@ -71,4 +72,39 @@ def test_raw_mode_exports_query_and_rejected_is_excluded(tmp_path) -> None:
     assert store.review(event_id=event_id, chat_id=10, reviewer_id="admin", approved=False)
     output = tmp_path / "learning.jsonl"
     assert store.export_jsonl(output, chat_id=10) == 0
+    store.close()
+
+
+def test_legacy_learning_schema_gets_chat_scope_migration(tmp_path) -> None:
+    database = tmp_path / "legacy-learning.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE learning_events (
+                event_id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                actor_hash TEXT NOT NULL,
+                query_kind TEXT NOT NULL,
+                query_hash TEXT NOT NULL,
+                response_state TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                raw_query TEXT,
+                rendered_response TEXT,
+                feedback TEXT,
+                feedback_note TEXT,
+                feedback_at TEXT,
+                reviewed INTEGER NOT NULL DEFAULT 0,
+                reviewed_at TEXT,
+                reviewer_hash TEXT,
+                review_decision TEXT,
+                correction TEXT
+            )
+            """
+        )
+
+    store = LearningStore(database, hash_salt="salt")
+    columns = {row["name"] for row in store._connection.execute("PRAGMA table_info(learning_events)")}
+
+    assert "chat_id" in columns
+    assert store.pending(123) == []
     store.close()

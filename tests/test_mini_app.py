@@ -19,11 +19,15 @@ def test_mini_app_monitoring_controls_update_server_state() -> None:
     assert "initDataUnsafe?.user?.id" in html
     assert "initDataUnsafe?.chat?.id" in html
     assert "params.get('chat_id')" in html
-    assert "fragmentParams.get('context')" in html
+    assert "params.get('context') || fragmentParams.get('context')" in html
     assert "request_id" in html
     assert "const storageKey" in html
     assert "const persistRows" in html
     assert "const rememberQuery" in html
+    assert "const valueRequired = new Set" in html
+    assert "valueRequired.has(action) && !value" in html
+    assert "new TextEncoder().encode(serializedPayload).length" in html
+    assert "Список слишком велик для резервного режима Telegram" in html
     assert 'id="shareList"' in html
     assert "action === 'share_list'" in html
     assert "shared_list_id" in html
@@ -70,9 +74,52 @@ async def test_private_chat_uses_api_web_app_button_when_api_is_configured(monke
     assert keyboard.inline_keyboard[0][0].text == "Открыть Mini App"
     url = keyboard.inline_keyboard[0][0].web_app.url
     assert url.startswith(
-        "https://example.test/mini_app/?chat_id=12345&api_url=https%3A%2F%2Fapi.example.test%2Fmini-app-api&transport=api#context="
+        "https://example.test/mini_app/?chat_id=12345&api_url=https%3A%2F%2Fapi.example.test%2Fmini-app-api&transport=api&context="
     )
-    assert len(url.rsplit("#context=", 1)[1]) >= 32
+    assert len(url.rsplit("&context=", 1)[1]) >= 32
+
+
+def test_mini_app_api_url_normalizes_trailing_slash(monkeypatch) -> None:
+    monkeypatch.setenv("MINI_APP_API_URL", "https://api.example.test/mini-app-api/")
+
+    assert telegram_bot._mini_app_api_url() == "https://api.example.test/mini-app-api"
+
+
+def test_mini_app_link_keeps_existing_fragment_after_query_parameters(monkeypatch) -> None:
+    monkeypatch.setenv("MINI_APP_URL", "https://example.test/mini_app/#telegram")
+    monkeypatch.delenv("MINI_APP_API_URL", raising=False)
+
+    keyboard = telegram_bot._mini_app_reply_keyboard(chat_id=12345)
+
+    assert keyboard is not None
+    assert keyboard.keyboard[0][0].web_app.url == (
+        "https://example.test/mini_app/?chat_id=12345&transport=web_app_data#telegram"
+    )
+
+
+def test_mini_app_payload_rejects_body_too_large_for_api_limits() -> None:
+    queries = [f"{'x' * 490}{index:03d}" for index in range(100)]
+
+    with pytest.raises(ValueError, match="слишком велик"):
+        telegram_bot._validate_mini_app_payload({"action": "export_excel", "queries": queries})
+
+
+@pytest.mark.asyncio
+async def test_check_command_runs_direct_query_without_opening_mini_app(monkeypatch) -> None:
+    called: list[str] = []
+
+    async def fake_run_check(message, query: str) -> None:
+        called.append(query)
+
+    async def fail_open(message) -> None:
+        raise AssertionError("Mini App must not open for a direct /check query")
+
+    monkeypatch.setattr(telegram_bot, "_run_check", fake_run_check)
+    monkeypatch.setattr(telegram_bot, "_open_check_mini_app", fail_open)
+
+    await telegram_bot.check(object(), SimpleNamespace(args="ИНН 7707083893"))
+
+    assert called == ["ИНН 7707083893"]
 
 
 def test_private_chat_keeps_legacy_reply_web_app_fallback(monkeypatch) -> None:

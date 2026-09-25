@@ -117,41 +117,58 @@ class ChatAccessStore:
             return True
         tag = normalize_tag(username or "") if username else ""
         user_key = str(user_id) if user_id is not None else None
-        with self._lock:
-            row = self._connection.execute(
-                """
-                SELECT status FROM chat_access
-                WHERE chat_id = ? AND (tag = ? OR (user_id IS NOT NULL AND user_id = ?))
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                (str(chat_id), tag, user_key),
-            ).fetchone()
-        if row is not None:
-            if row["status"] == "granted" and user_key and tag:
-                with self._lock, self._connection:
-                    self._connection.execute(
-                        """
-                        UPDATE chat_access SET user_id = ?
-                        WHERE chat_id = ? AND tag = ? AND status = 'granted' AND user_id IS NULL
-                        """,
-                        (user_key, str(chat_id), tag),
-                    )
+        with self._lock, self._connection:
+            row = self._find_identity_row(str(chat_id), tag, user_key)
+            if row is None:
+                return bool(tag and tag in self.bootstrap_tags)
+            if row["user_id"] is not None and row["user_id"] != user_key:
+                # A Telegram username can be reassigned. Once a row is bound
+                # to a numeric user_id, the old tag must not authenticate a
+                # different account.
+                return False
+            if row["status"] == "granted" and user_key and row["user_id"] is None:
+                self._connection.execute(
+                    "UPDATE chat_access SET user_id=? WHERE chat_id=? AND tag=? AND user_id IS NULL",
+                    (user_key, str(chat_id), tag),
+                )
             return row["status"] == "granted"
-        return bool(tag and tag in self.bootstrap_tags)
 
     def role_for(self, chat_id: int | str, *, user_id: int | str | None, username: str | None) -> str | None:
         if is_main_admin(username, user_id=user_id):
             return "owner"
         tag = normalize_tag(username or "") if username else ""
         user_key = str(user_id) if user_id is not None else None
-        with self._lock:
+        with self._lock, self._connection:
+            row = self._find_identity_row(str(chat_id), tag, user_key)
+            if row is None:
+                return "checker" if tag in self.bootstrap_tags else None
+            if row["user_id"] is not None and row["user_id"] != user_key:
+                return None
+            if row["status"] != "granted":
+                return None
+            if user_key and row["user_id"] is None:
+                self._connection.execute(
+                    "UPDATE chat_access SET user_id=? WHERE chat_id=? AND tag=? AND user_id IS NULL",
+                    (user_key, str(chat_id), tag),
+                )
+            return row["role"] or "checker"
+
+    def _find_identity_row(self, chat_id: str, tag: str, user_key: str | None):
+        """Find the strongest matching identity without accepting tag takeover."""
+
+        if user_key is not None:
             row = self._connection.execute(
-                "SELECT role FROM chat_access WHERE chat_id=? AND status='granted' "
-                "AND (tag=? OR (user_id IS NOT NULL AND user_id=?)) ORDER BY updated_at DESC LIMIT 1",
-                (str(chat_id), tag, user_key),
+                "SELECT * FROM chat_access WHERE chat_id=? AND user_id=? ORDER BY updated_at DESC LIMIT 1",
+                (chat_id, user_key),
             ).fetchone()
-        return row["role"] if row else ("checker" if tag in self.bootstrap_tags else None)
+            if row is not None:
+                return row
+        if not tag:
+            return None
+        return self._connection.execute(
+            "SELECT * FROM chat_access WHERE chat_id=? AND tag=?",
+            (chat_id, tag),
+        ).fetchone()
 
     def grant(
         self,
@@ -169,12 +186,21 @@ class ChatAccessStore:
             return False
         now = self._now()
         with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT user_id FROM chat_access WHERE chat_id=? AND tag=?",
+                (str(chat_id), tag),
+            ).fetchone()
+            if user_id is None and existing is not None and existing["user_id"] is not None:
+                # A username can be reassigned. Do not reactivate or alter a
+                # numeric binding unless the administrator replies to the
+                # current user's message and supplies that user_id.
+                return False
             self._connection.execute(
                 """
                 INSERT INTO chat_access (chat_id, tag, user_id, status, updated_at, updated_by, role)
                 VALUES (?, ?, ?, 'granted', ?, ?, ?)
                 ON CONFLICT(chat_id, tag) DO UPDATE SET
-                    user_id = excluded.user_id,
+                    user_id = COALESCE(excluded.user_id, chat_access.user_id),
                     status = 'granted',
                     updated_at = excluded.updated_at,
                     updated_by = excluded.updated_by,
@@ -196,28 +222,47 @@ class ChatAccessStore:
         if not tag or is_main_admin(user_id=user_id):
             return False
         now = self._now()
+        user_key = str(user_id) if user_id is not None else None
         with self._lock, self._connection:
-            cursor = self._connection.execute(
-                """
-                UPDATE chat_access
-                SET status = 'revoked', updated_at = ?, updated_by = ?
-                WHERE chat_id = ? AND (tag = ? OR (user_id IS NOT NULL AND user_id = ?))
-                """,
-                (now, str(revoked_by), str(chat_id), tag, str(user_id) if user_id is not None else None),
-            )
-            if cursor.rowcount:
-                return True
+            if user_key is not None:
+                cursor = self._connection.execute(
+                    """
+                    UPDATE chat_access
+                    SET status='revoked', updated_at=?, updated_by=?
+                    WHERE chat_id=? AND user_id=?
+                    """,
+                    (now, str(revoked_by), str(chat_id), user_key),
+                )
+                if cursor.rowcount:
+                    return True
+                row = self._connection.execute(
+                    "SELECT user_id FROM chat_access WHERE chat_id=? AND tag=?",
+                    (str(chat_id), tag),
+                ).fetchone()
+                if row is not None and row["user_id"] is not None:
+                    # Do not revoke a different account that currently owns
+                    # the old username.
+                    return False
+                if row is not None:
+                    cursor = self._connection.execute(
+                        """
+                        UPDATE chat_access SET user_id=?, status='revoked', updated_at=?, updated_by=?
+                        WHERE chat_id=? AND tag=? AND user_id IS NULL
+                        """,
+                        (user_key, now, str(revoked_by), str(chat_id), tag),
+                    )
+                    return bool(cursor.rowcount)
             self._connection.execute(
                 """
                 INSERT INTO chat_access (chat_id, tag, user_id, status, updated_at, updated_by)
-                VALUES (?, ?, NULL, 'revoked', ?, ?)
+                VALUES (?, ?, ?, 'revoked', ?, ?)
                 ON CONFLICT(chat_id, tag) DO UPDATE SET
                     user_id = COALESCE(chat_access.user_id, excluded.user_id),
                     status = 'revoked',
                     updated_at = excluded.updated_at,
                     updated_by = excluded.updated_by
                 """,
-                (str(chat_id), tag, now, str(revoked_by)),
+                (str(chat_id), tag, user_key, now, str(revoked_by)),
             )
         return True
 

@@ -87,6 +87,8 @@ MINI_APP_ACTIONS = frozenset(
 )
 MINI_APP_EXPENSIVE_ACTIONS = frozenset({"check", "export_excel", "share_list", "batch_cancel", "batch_status"})
 MINI_APP_MAX_QUERY_LENGTH = 500
+MINI_APP_MAX_QUERIES_PAYLOAD_BYTES = 24 * 1024
+MINI_APP_SEND_DATA_MAX_BYTES = 4096
 MINI_APP_MAX_EMAIL_LENGTH = 254
 MINI_APP_MAX_JOB_ID_LENGTH = 128
 MINI_APP_MAX_SHARED_LIST_ID_LENGTH = 128
@@ -131,7 +133,15 @@ def _mini_app_api_url() -> str:
     """Возвращает HTTPS-адрес API Mini App, если он настроен."""
 
     url = os.getenv("MINI_APP_API_URL", "").strip()
-    return url if url.startswith("https://") else ""
+    if not url.startswith("https://"):
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.query or parsed.fragment:
+        return ""
+    path = parsed.path.rstrip("/")
+    if path != MINI_APP_API_PATH:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
 
 
 def _mini_app_link(
@@ -168,17 +178,16 @@ def _mini_app_link(
     if api_url:
         params.append(f"api_url={quote(api_url, safe='')}")
     params.append(f"transport={quote(transport, safe='')}")
+    if context_token:
+        params.append(f"context={quote(context_token, safe='')}")
+    base_url, hash_marker, fragment = url.partition("#")
     if not params:
-        result = url
-    else:
-        separator = "&" if "?" in url else "?"
-        result = f"{url}{separator}{'&'.join(params)}"
-    if not context_token:
-        return result
-    base, hash_marker, existing_fragment = result.partition("#")
-    fragment_parts = [existing_fragment] if existing_fragment else []
-    fragment_parts.append(f"context={quote(context_token, safe='')}")
-    return f"{base}{hash_marker or '#'}{'&'.join(fragment_parts)}"
+        return url
+    separator = "&" if "?" in base_url else "?"
+    result = f"{base_url}{separator}{'&'.join(params)}"
+    if hash_marker:
+        result = f"{result}#{fragment}"
+    return result
 
 
 def _mini_app_keyboard(
@@ -339,6 +348,8 @@ def _validate_mini_app_payload(payload: object, *, require_context: bool = False
             if key not in seen:
                 seen.add(key)
                 queries.append(query)
+        if len(json.dumps(queries, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MINI_APP_MAX_QUERIES_PAYLOAD_BYTES:
+            raise ValueError("Список компаний слишком велик для передачи одним запросом")
         normalized["queries"] = queries
     elif action == "set_email":
         email = payload.get("email")
@@ -377,6 +388,8 @@ def _validate_mini_app_payload(payload: object, *, require_context: bool = False
         normalized["request_id"] = request_id
     if require_context and ("context" not in normalized or "request_id" not in normalized):
         raise MiniAppSecurityError("Запрос не содержит защищённого контекста Mini App")
+    if not require_context and len(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MINI_APP_SEND_DATA_MAX_BYTES:
+        raise ValueError("Данные Mini App слишком велики для Telegram")
     return normalized
 
 
@@ -652,8 +665,8 @@ def help_text() -> str:
         "/help — показать этот список команд.\n"
         "/menu — показать постоянное меню быстрых действий.\n"
         "/skills — рассказать, что умеет агент.\n"
-        "/check — открыть MiniApp для проверки компании.\n"
-        "  Реквизиты вводятся внутри MiniApp: ИНН, ОГРН, КПП, название или адрес.\n"
+        "/check [реквизиты] — проверить в чате или открыть MiniApp без аргументов.\n"
+        "  Введите ИНН, ОГРН, КПП, название или адрес; без аргументов откроется MiniApp.\n"
         "  После проверки бот отправляет текст и Excel-файл с четырьмя столбцами.\n"
         "  Для запуска проверки напишите: «Налог, проверка».\n"
         "/history — показать ранее выполненные проверки в текущем чате.\n"
@@ -796,6 +809,9 @@ def _feedback_keyboard(event_id: str) -> InlineKeyboardMarkup:
 async def check(message: Message, command: CommandObject) -> None:
     if command.args and command.args.strip().casefold() == "all":
         await check_all(message)
+        return
+    if command.args and command.args.strip():
+        await _run_check(message, command.args.strip())
         return
     await _open_check_mini_app(message)
 
@@ -1819,7 +1835,9 @@ async def grant_access(message: Message, command: CommandObject) -> None:
         _audit(message, "access_granted", f"role={_requested_role(command)}")
         await message.answer(f"Пользователю @{tag} выдан доступ в этом чате с ролью {_requested_role(command)}.")
     else:
-        await message.answer("Нельзя выдать доступ Главному администратору или указан некорректный тег.")
+        await message.answer(
+            "Не удалось выдать доступ. Для уже привязанного пользователя выполните /grant ответом на его сообщение."
+        )
 
 
 @router.message(Command("revoke"))
