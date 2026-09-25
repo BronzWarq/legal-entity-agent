@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from legal_entity_agent import telegram_bot
 from legal_entity_agent.mini_app_security import MiniAppContextStore, MiniAppRateLimiter
+from legal_entity_agent.shared_lists import SharedListStore
 
 
 def _signed_init_data(bot_token: str, *, user_id: int = 42) -> str:
@@ -94,3 +95,57 @@ async def test_api_uses_server_context_and_rejects_chat_id_tampering(monkeypatch
     assert message.chat.id == -100123
     assert message.chat.type == "supergroup"
     assert payload == {"action": "check", "query": "7707083893"}
+
+
+@pytest.mark.asyncio
+async def test_shared_list_api_returns_queries_only_for_the_bound_chat(monkeypatch) -> None:
+    bot_token = "12345:test-token"
+    context_store = MiniAppContextStore()
+    shared_store = SharedListStore(":memory:")
+    shared = shared_store.create(-100123, 99, ["закрытый запрос"])
+
+    class Access:
+        def role_for(self, chat_id, *, user_id, username):
+            return "checker" if chat_id == -100123 else None
+
+    monkeypatch.setattr(telegram_bot, "access_store", Access())
+    monkeypatch.setattr(telegram_bot, "shared_list_store", shared_store)
+    app = web.Application()
+    app[telegram_bot._MINI_APP_BOT_KEY] = object()
+    app[telegram_bot._MINI_APP_BOT_TOKEN_KEY] = bot_token
+    app[telegram_bot._MINI_APP_CONTEXT_STORE_KEY] = context_store
+    app[telegram_bot._MINI_APP_RATE_LIMITER_KEY] = MiniAppRateLimiter(limit=30, window_seconds=60)
+    app[telegram_bot._MINI_APP_EXPENSIVE_RATE_LIMITER_KEY] = MiniAppRateLimiter(limit=8, window_seconds=60)
+    app[telegram_bot._MINI_APP_SEMAPHORE_KEY] = asyncio.Semaphore(2)
+    app.router.add_post(telegram_bot.MINI_APP_API_PATH, telegram_bot._mini_app_api)
+
+    headers = {"X-Telegram-Init-Data": _signed_init_data(bot_token)}
+    same_chat_context = context_store.issue(-100123, chat_type="supergroup")
+    other_chat_context = context_store.issue(-100999, chat_type="supergroup")
+    async with TestServer(app) as server:
+        async with TestClient(server) as client:
+            accepted = await client.post(
+                telegram_bot.MINI_APP_API_PATH,
+                headers=headers,
+                json={
+                    "action": "import_shared_list",
+                    "shared_list_id": shared.share_id,
+                    "context": same_chat_context,
+                    "request_id": "import-same-chat-123",
+                },
+            )
+            assert accepted.status == 200
+            assert (await accepted.json())["shared_queries"] == ["закрытый запрос"]
+
+            rejected = await client.post(
+                telegram_bot.MINI_APP_API_PATH,
+                headers=headers,
+                json={
+                    "action": "import_shared_list",
+                    "shared_list_id": shared.share_id,
+                    "context": other_chat_context,
+                    "request_id": "import-other-chat-123",
+                },
+            )
+            assert rejected.status == 404
+    shared_store.close()

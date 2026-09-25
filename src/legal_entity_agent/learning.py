@@ -31,6 +31,7 @@ class FeedbackLabel(StrEnum):
 @dataclass(frozen=True, slots=True)
 class LearningEvent:
     event_id: str
+    chat_id: str
     created_at: datetime
     actor_hash: str
     query_kind: str
@@ -113,6 +114,7 @@ class LearningStore:
                 """
                 CREATE TABLE IF NOT EXISTS learning_events (
                     event_id TEXT PRIMARY KEY,
+                    chat_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     actor_hash TEXT NOT NULL,
                     query_kind TEXT NOT NULL,
@@ -132,14 +134,26 @@ class LearningStore:
                 )
                 """
             )
+            columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(learning_events)")}
+            if "chat_id" not in columns:
+                # Старые записи не имеют подтверждённой области видимости и
+                # не должны автоматически становиться видимыми из любого чата.
+                self._connection.execute(
+                    "ALTER TABLE learning_events ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''"
+                )
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_learning_events_reviewed "
                 "ON learning_events (reviewed, created_at)"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learning_events_chat_actor "
+                "ON learning_events (chat_id, actor_hash, created_at)"
             )
 
     def record_check(
         self,
         *,
+        chat_id: int | str,
         actor_id: str,
         identifier: Identifier | SearchQuery,
         assessment: Assessment,
@@ -154,12 +168,13 @@ class LearningStore:
             self._connection.execute(
                 """
                 INSERT INTO learning_events (
-                    event_id, created_at, actor_hash, query_kind, query_hash,
+                    event_id, chat_id, created_at, actor_hash, query_kind, query_hash,
                     response_state, source_url, raw_query, rendered_response
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
+                    str(chat_id),
                     _timestamp(created_at),
                     _digest(actor_id, self.hash_salt),
                     _query_kind(query),
@@ -175,6 +190,7 @@ class LearningStore:
     def record_failure(
         self,
         *,
+        chat_id: int | str,
         actor_id: str,
         identifier: Identifier | SearchQuery,
         error: str,
@@ -187,12 +203,13 @@ class LearningStore:
             self._connection.execute(
                 """
                 INSERT INTO learning_events (
-                    event_id, created_at, actor_hash, query_kind, query_hash,
+                    event_id, chat_id, created_at, actor_hash, query_kind, query_hash,
                     response_state, source_url, raw_query, rendered_response
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_id,
+                    str(chat_id),
                     _timestamp(_utc_now()),
                     _digest(actor_id, self.hash_salt),
                     _query_kind(query),
@@ -209,6 +226,7 @@ class LearningStore:
         self,
         *,
         event_id: str,
+        chat_id: int | str,
         actor_id: str,
         label: FeedbackLabel,
         note: str | None = None,
@@ -222,8 +240,8 @@ class LearningStore:
 
         with self._lock, self._connection:
             row = self._connection.execute(
-                "SELECT actor_hash FROM learning_events WHERE event_id = ?",
-                (event_id,),
+                "SELECT actor_hash FROM learning_events WHERE event_id = ? AND chat_id = ?",
+                (event_id, str(chat_id)),
             ).fetchone()
             if row is None:
                 return False
@@ -233,22 +251,22 @@ class LearningStore:
                 """
                 UPDATE learning_events
                 SET feedback = ?, feedback_note = ?, feedback_at = ?
-                WHERE event_id = ?
+                WHERE event_id = ? AND chat_id = ?
                 """,
-                (label.value, note, _timestamp(_utc_now()), event_id),
+                (label.value, note, _timestamp(_utc_now()), event_id, str(chat_id)),
             )
         return True
 
-    def pending(self, limit: int = 20) -> list[LearningEvent]:
+    def pending(self, chat_id: int | str, limit: int = 20) -> list[LearningEvent]:
         with self._lock:
             rows = self._connection.execute(
                 """
                 SELECT * FROM learning_events
-                WHERE reviewed = 0
+                WHERE chat_id = ? AND reviewed = 0
                 ORDER BY created_at ASC
                 LIMIT ?
                 """,
-                (max(1, min(limit, 100)),),
+                (str(chat_id), max(1, min(limit, 100))),
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
@@ -256,6 +274,7 @@ class LearningStore:
         self,
         *,
         event_id: str,
+        chat_id: int | str,
         reviewer_id: str,
         approved: bool,
         correction: str | None = None,
@@ -272,7 +291,7 @@ class LearningStore:
                 UPDATE learning_events
                 SET reviewed = 1, reviewed_at = ?, reviewer_hash = ?,
                     review_decision = ?, correction = ?
-                WHERE event_id = ?
+                WHERE event_id = ? AND chat_id = ?
                 """,
                 (
                     _timestamp(_utc_now()),
@@ -280,17 +299,28 @@ class LearningStore:
                     "approved" if approved else "rejected",
                     correction if approved else None,
                     event_id,
+                    str(chat_id),
                 ),
             )
         return cursor.rowcount == 1
 
-    def export_jsonl(self, path: str | Path, *, reviewed_only: bool = True) -> int:
+    def export_jsonl(
+        self,
+        path: str | Path,
+        *,
+        chat_id: int | str,
+        reviewed_only: bool = True,
+    ) -> int:
         """Экспортирует одобренные примеры для последующей проверки/обучения."""
 
-        clause = "WHERE reviewed = 1 AND review_decision = 'approved'" if reviewed_only else ""
+        conditions = ["chat_id = ?"]
+        params: list[str] = [str(chat_id)]
+        if reviewed_only:
+            conditions.extend(["reviewed = 1", "review_decision = 'approved'"])
+        clause = "WHERE " + " AND ".join(conditions)
         with self._lock:
             rows = self._connection.execute(
-                f"SELECT * FROM learning_events {clause} ORDER BY created_at ASC"
+                f"SELECT * FROM learning_events {clause} ORDER BY created_at ASC", params
             ).fetchall()
         output = Path(path)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -333,6 +363,7 @@ class LearningStore:
         feedback = row["feedback"]
         return LearningEvent(
             event_id=row["event_id"],
+            chat_id=row["chat_id"],
             created_at=_parse_timestamp(row["created_at"]),
             actor_hash=row["actor_hash"],
             query_kind=row["query_kind"],

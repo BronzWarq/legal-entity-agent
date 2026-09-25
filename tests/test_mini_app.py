@@ -26,7 +26,8 @@ def test_mini_app_monitoring_controls_update_server_state() -> None:
     assert "const rememberQuery" in html
     assert 'id="shareList"' in html
     assert "action === 'share_list'" in html
-    assert "shared_queries" in html
+    assert "shared_list_id" in html
+    assert "params.get('shared_queries')" not in html
     assert "Добавлено компаний из общего списка" in html
     assert 'id="exportExcel"' in html
     assert "send('export_excel')" in html

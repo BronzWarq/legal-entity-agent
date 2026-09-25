@@ -62,7 +62,7 @@ def test_history_is_scoped_to_chat_and_user(tmp_path) -> None:
     store.close()
 
 
-def test_list_unique_queries_deduplicates_by_inn_and_keeps_free_text(tmp_path) -> None:
+def test_list_unique_queries_is_scoped_to_current_chat(tmp_path) -> None:
     store = HistoryStore(tmp_path / "history.sqlite3", hash_salt="salt")
     assessment = _assessment()
     store.record_check(
@@ -95,11 +95,24 @@ def test_list_unique_queries_deduplicates_by_inn_and_keeps_free_text(tmp_path) -
         ),
         report="Свободный поиск",
     )
+    store.record_check(
+        event_id="free-text-current-chat",
+        chat_id=10,
+        actor_id=100,
+        query=SearchQuery("свободный запрос текущего чата"),
+        assessment=Assessment(
+            FnsEntityRecord(
+                query=SearchQuery("свободный запрос текущего чата"),
+                source_url="https://egrul.nalog.ru/search-result/current",
+                fetched_at=datetime.now().astimezone(),
+            )
+        ),
+        report="Свободный поиск текущего чата",
+    )
 
-    queries = store.list_unique_queries()
+    queries = store.list_unique_queries(chat_id=10, actor_id=999, is_root=True)
 
-    assert {query.value for query in queries} == {
-        "ООО Ромашка, Москва",
-        "новая компания без реквизитов",
-    }
+    assert {query.value for query in queries} == {"ИНН 7707083893", "свободный запрос текущего чата"}
+    assert store.list_unique_queries(chat_id=20, actor_id=999, is_root=True)[0].value == "ООО Ромашка, Москва"
+    assert store.list_unique_queries(chat_id=10, actor_id=999, is_root=False) == []
     store.close()

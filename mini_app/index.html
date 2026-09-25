@@ -223,6 +223,7 @@
     const urlChatId = params.get('chat_id');
     const telegramChatId = initChatId || urlChatId;
     const launchContext = fragmentParams.get('context') || params.get('context');
+    const sharedListId = params.get('shared_list_id');
     const apiUrl = params.get('api_url');
     const transport = params.get('transport') || 'api';
     const chatKey = telegramChatId || `private:${telegramUserId || 'anonymous'}`;
@@ -247,24 +248,6 @@
       else rows.push({ query, state });
       persistRows();
     };
-    const importSharedRows = () => {
-      const raw = params.get('shared_queries');
-      if (!raw || (initChatId && urlChatId && String(initChatId) !== String(urlChatId))) return 0;
-      try {
-        const shared = JSON.parse(raw);
-        if (!Array.isArray(shared)) return 0;
-        let imported = 0;
-        shared.filter(query => typeof query === 'string' && query.trim()).forEach(query => {
-          const before = rows.length;
-          rememberQuery(query, 'получена из общего списка');
-          if (rows.length > before) imported += 1;
-        });
-        return imported;
-      } catch (error) {
-        return 0;
-      }
-    };
-    const importedRows = importSharedRows();
     const getRows = () => rows;
     const render = () => {
       const body = document.querySelector('#companies');
@@ -312,20 +295,21 @@
       if (action === 'check' || action === 'watch' || action === 'unwatch') payload.query = value;
       else if (action === 'set_email') payload.email = value;
       else if (action === 'share_list') payload.queries = rows.map(row => row.query);
+      else if (action === 'import_shared_list') payload.shared_list_id = value;
       else if (action !== 'remove_email') payload.job_id = value;
       const confirmationText = 'Команда передана боту. Ответ появится в чате.';
       if (transport === 'web_app_data' && tg?.sendData) {
         tg.sendData(JSON.stringify(payload));
         document.querySelector('#result').textContent = confirmationText;
-        return;
+        return null;
       }
       if (!apiUrl || !telegramChatId || !tg?.initData) {
         document.querySelector('#result').textContent = 'Не удалось связаться с ботом: API Mini App не настроен.';
-        return;
+        return null;
       }
       if (!window.crypto?.randomUUID && !window.crypto?.getRandomValues) {
         document.querySelector('#result').textContent = 'Защищённый режим Mini App недоступен в этом окружении.';
-        return;
+        return null;
       }
       const requestId = window.crypto?.randomUUID
         ? window.crypto.randomUUID()
@@ -348,9 +332,28 @@
         const result = await response.json().catch(() => ({}));
         if (!response.ok || !result.ok) throw new Error(result.error || 'сервер отклонил запрос');
         document.querySelector('#result').textContent = result.message || confirmationText;
+        return result;
       } catch (error) {
         document.querySelector('#result').textContent = `Не удалось передать команду боту: ${error.message}`;
+        return null;
       }
+    };
+    const importSharedRows = async () => {
+      if (!sharedListId || transport !== 'api') return 0;
+      const result = await send('import_shared_list', sharedListId);
+      const shared = Array.isArray(result?.shared_queries) ? result.shared_queries : [];
+      let imported = 0;
+      shared.filter(query => typeof query === 'string' && query.trim()).forEach(query => {
+        const before = rows.length;
+        rememberQuery(query, 'получена из общего списка');
+        if (rows.length > before) imported += 1;
+      });
+      if (imported) {
+        persistRows();
+        render();
+        document.querySelector('#result').textContent = `Добавлено компаний из общего списка: ${imported}.`;
+      }
+      return imported;
     };
     document.querySelector('#check').onclick = () => {
       const query = document.querySelector('#query').value.trim();
@@ -383,7 +386,7 @@
     };
     document.querySelector('#removeEmail').onclick = () => send('remove_email', 'remove');
     render();
-    if (importedRows) document.querySelector('#result').textContent = `Добавлено компаний из общего списка: ${importedRows}.`;
+    void importSharedRows();
   </script>
 </body>
 </html>

@@ -92,6 +92,10 @@ class HistoryStore:
                 "CREATE INDEX IF NOT EXISTS idx_check_history_chat_time "
                 "ON check_history (chat_id, created_at)"
             )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_check_history_chat_actor_time "
+                "ON check_history (chat_id, actor_hash, created_at)"
+            )
 
     def record_check(
         self,
@@ -157,23 +161,31 @@ class HistoryStore:
             rows = self._connection.execute(sql, params).fetchall()
         return [self._row_to_entry(row) for row in rows]
 
-    def list_unique_queries(self) -> list[SearchQuery]:
-        """Возвращает уникальные юридические лица из всей истории.
+    def list_unique_queries(
+        self,
+        *,
+        chat_id: int | str,
+        actor_id: int | str,
+        is_root: bool,
+    ) -> list[SearchQuery]:
+        """Возвращает уникальные запросы только из разрешённой области.
 
         Приоритетом для объединения записей служат ИНН и ОГРН из уже
         полученного ответа ФНС. КПП без ИНН/ОГРН не считается уникальным
         идентификатором, поэтому в этом случае используется исходный текст
-        запроса. Более свежая запись сохраняется первой.
+        запроса. Более свежая запись сохраняется первой. Главный администратор
+        видит здесь весь текущий чат, обычный пользователь — только свои
+        записи текущего чата.
         """
 
+        sql = "SELECT query_text, inn, ogrn, kpp FROM check_history WHERE chat_id = ?"
+        params: list[str] = [str(chat_id)]
+        if not is_root:
+            sql += " AND actor_hash = ?"
+            params.append(_digest(str(actor_id), self.hash_salt))
+        sql += " ORDER BY created_at DESC"
         with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT query_text, inn, ogrn, kpp
-                FROM check_history
-                ORDER BY created_at DESC
-                """
-            ).fetchall()
+            rows = self._connection.execute(sql, params).fetchall()
 
         queries: list[SearchQuery] = []
         seen: set[str] = set()

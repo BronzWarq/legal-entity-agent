@@ -78,6 +78,7 @@ MINI_APP_ACTIONS = frozenset(
         "unwatch",
         "export_excel",
         "share_list",
+        "import_shared_list",
         "set_email",
         "remove_email",
         "batch_cancel",
@@ -88,6 +89,7 @@ MINI_APP_EXPENSIVE_ACTIONS = frozenset({"check", "export_excel", "share_list", "
 MINI_APP_MAX_QUERY_LENGTH = 500
 MINI_APP_MAX_EMAIL_LENGTH = 254
 MINI_APP_MAX_JOB_ID_LENGTH = 128
+MINI_APP_MAX_SHARED_LIST_ID_LENGTH = 128
 _MINI_APP_BOT_KEY = web.AppKey("mini_app_bot", Bot)
 _MINI_APP_BOT_TOKEN_KEY = web.AppKey("mini_app_bot_token", str)
 _MINI_APP_CONTEXT_STORE_KEY = web.AppKey("mini_app_context_store", MiniAppContextStore)
@@ -136,7 +138,7 @@ def _mini_app_link(
     *,
     chat_id: int | str | None = None,
     chat_type: str | None = None,
-    shared_queries: list[str] | None = None,
+    shared_list_id: str | None = None,
     transport: str = "api",
 ) -> str:
     """Возвращает ссылку Mini App с непрозрачным контекстом чата.
@@ -160,9 +162,8 @@ def _mini_app_link(
         )
     if chat_id is not None:
         params.append(f"chat_id={quote(str(chat_id), safe='')}")
-    if shared_queries:
-        encoded = json.dumps(shared_queries, ensure_ascii=False, separators=(",", ":"))
-        params.append(f"shared_queries={quote(encoded, safe='')}")
+    if shared_list_id:
+        params.append(f"shared_list_id={quote(shared_list_id, safe='')}")
     api_url = _mini_app_api_url()
     if api_url:
         params.append(f"api_url={quote(api_url, safe='')}")
@@ -184,12 +185,12 @@ def _mini_app_keyboard(
     *,
     chat_id: int | str | None = None,
     chat_type: str | None = None,
-    shared_queries: list[str] | None = None,
+    shared_list_id: str | None = None,
 ) -> InlineKeyboardMarkup | None:
     url = _mini_app_link(
         chat_id=chat_id,
         chat_type=chat_type,
-        shared_queries=shared_queries,
+        shared_list_id=shared_list_id,
         transport="api",
     )
     if not url:
@@ -295,7 +296,17 @@ def _validate_mini_app_payload(payload: object, *, require_context: bool = False
 
     if not isinstance(payload, dict):
         raise ValueError("Некорректное тело запроса Mini App")
-    allowed_fields = {"action", "query", "queries", "email", "job_id", "context", "request_id", "chat_id"}
+    allowed_fields = {
+        "action",
+        "query",
+        "queries",
+        "email",
+        "job_id",
+        "shared_list_id",
+        "context",
+        "request_id",
+        "chat_id",
+    }
     unknown_fields = set(payload) - allowed_fields
     if unknown_fields:
         raise ValueError("Mini App передал неизвестные поля")
@@ -339,6 +350,15 @@ def _validate_mini_app_payload(payload: object, *, require_context: bool = False
         if not isinstance(job_id, str) or not job_id.strip() or len(job_id.strip()) > MINI_APP_MAX_JOB_ID_LENGTH:
             raise ValueError("Идентификатор задания некорректен")
         normalized["job_id"] = job_id.strip()
+    elif action == "import_shared_list":
+        shared_list_id = payload.get("shared_list_id")
+        if (
+            not isinstance(shared_list_id, str)
+            or not shared_list_id.strip()
+            or len(shared_list_id.strip()) > MINI_APP_MAX_SHARED_LIST_ID_LENGTH
+        ):
+            raise ValueError("Идентификатор общего списка некорректен")
+        normalized["shared_list_id"] = shared_list_id.strip()
 
     if "chat_id" in payload:
         try:
@@ -433,6 +453,25 @@ async def _mini_app_api(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "Контекст Mini App недействителен или устарел."}, status=401)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=400)
+    if payload["action"] == "import_shared_list":
+        if shared_list_store is None:
+            return web.json_response({"ok": False, "error": "Общие списки сейчас недоступны."}, status=503)
+        shared = shared_list_store.get(payload["shared_list_id"], context.chat_id)
+        if shared is None:
+            return web.json_response({"ok": False, "error": "Список устарел или недоступен."}, status=404)
+        if not _can_check_user(context.chat_id, user):
+            return web.json_response(
+                {"ok": False, "error": "У вас нет разрешения на проверки в этом чате."}, status=403
+            )
+        if str(user.id) == shared.owner_id:
+            return web.json_response({"ok": False, "error": "Этот список уже принадлежит вам."}, status=409)
+        return web.json_response(
+            {
+                "ok": True,
+                "shared_queries": list(shared.queries),
+                "message": "Список получен и добавляется в ваш Mini App.",
+            }
+        )
     try:
         message = _MiniAppMessage(
             request.app[_MINI_APP_BOT_KEY], context.chat_id, context.chat_type, user, payload
@@ -786,7 +825,12 @@ async def _run_check(message: Message, raw_query: str) -> None:
     except FnsError as exc:
         if learning_store and message.from_user and query is not None:
             try:
-                learning_store.record_failure(actor_id=str(message.from_user.id), identifier=query, error=str(exc))
+                learning_store.record_failure(
+                    chat_id=message.chat.id,
+                    actor_id=str(message.from_user.id),
+                    identifier=query,
+                    error=str(exc),
+                )
             except Exception:
                 logging.exception("Не удалось сохранить ошибку проверки в журнал обучения")
         await message.answer(f"Проверка ФНС не выполнена: {exc}")
@@ -795,6 +839,7 @@ async def _run_check(message: Message, raw_query: str) -> None:
         if learning_store and message.from_user and query is not None:
             try:
                 learning_store.record_failure(
+                    chat_id=message.chat.id,
                     actor_id=str(message.from_user.id), identifier=query, error="internal error"
                 )
             except Exception:
@@ -808,6 +853,7 @@ async def _run_check(message: Message, raw_query: str) -> None:
         if learning_store and message.from_user:
             try:
                 learning_event_id = learning_store.record_check(
+                    chat_id=message.chat.id,
                     actor_id=str(message.from_user.id),
                     identifier=query,
                     assessment=result,
@@ -867,6 +913,7 @@ async def feedback_callback(callback: CallbackQuery) -> None:
         return
     saved = learning_store.add_feedback(
         event_id=parts[1],
+        chat_id=callback.message.chat.id,
         actor_id=str(callback.from_user.id),
         label=label,
         is_admin=is_main_admin(callback.from_user.username, user_id=callback.from_user.id),
@@ -891,6 +938,7 @@ async def feedback_command(message: Message, command: CommandObject) -> None:
         return
     saved = learning_store.add_feedback(
         event_id=parts[0],
+        chat_id=message.chat.id,
         actor_id=str(message.from_user.id),
         label=label,
         note=parts[2] if len(parts) == 3 else None,
@@ -1252,6 +1300,7 @@ async def _record_batch_failure(job: BatchJob, query: SearchQuery, error: str) -
         return
     try:
         learning_store.record_failure(
+            chat_id=job.chat_id,
             actor_id=str(job.actor_id),
             identifier=query,
             error=error,
@@ -1266,6 +1315,7 @@ async def _record_batch_success(message: Message, job: BatchJob, query: SearchQu
     if learning_store:
         try:
             event_id = learning_store.record_check(
+                chat_id=job.chat_id,
                 actor_id=str(job.actor_id),
                 identifier=query,
                 assessment=result,
@@ -1467,7 +1517,11 @@ async def check_all(message: Message) -> None:
         await message.answer("Массовая проверка сейчас недоступна: хранилище не настроено.")
         return
 
-    queries = history_store.list_unique_queries()
+    queries = history_store.list_unique_queries(
+        chat_id=message.chat.id,
+        actor_id=message.from_user.id,
+        is_root=True,
+    )
     if not queries:
         await message.answer("В базе истории нет сохранённых юридических лиц для проверки.")
         return
@@ -1644,17 +1698,19 @@ async def shared_list_callback(callback: CallbackQuery) -> None:
     if shared is None:
         await callback.answer("Список устарел или относится к другому чату.", show_alert=True)
         return
+    if not _mini_app_api_url():
+        await callback.answer("Для защищённой передачи списка требуется настроенный Mini App API.", show_alert=True)
+        return
     if str(callback.from_user.id) == shared.owner_id:
         await callback.answer("Этот список уже принадлежит вам.", show_alert=True)
         return
     if not _can_check_user(callback.message.chat.id, callback.from_user):
         await callback.answer("У вас нет разрешения на проверки в этом чате.", show_alert=True)
         return
-    shared_queries = list(shared.queries)
     shared_url = _mini_app_link(
         chat_id=callback.message.chat.id,
         chat_type=callback.message.chat.type,
-        shared_queries=shared_queries,
+        shared_list_id=shared.share_id,
     )
     if len(shared_url) > MAX_SHARED_MINI_APP_URL_LENGTH:
         await callback.answer(
@@ -1665,7 +1721,7 @@ async def shared_list_callback(callback: CallbackQuery) -> None:
     keyboard = _mini_app_keyboard(
         chat_id=callback.message.chat.id,
         chat_type=callback.message.chat.type,
-        shared_queries=shared_queries,
+        shared_list_id=shared.share_id,
     )
     if keyboard is None:
         await callback.answer("Mini App пока не опубликован.", show_alert=True)
@@ -1682,7 +1738,7 @@ async def learning_queue(message: Message) -> None:
     if not message.from_user or not _is_root(message) or learning_store is None:
         await message.answer("Команда доступна администраторам.")
         return
-    events = learning_store.pending()
+    events = learning_store.pending(message.chat.id)
     if not events:
         await message.answer("Очередь обучения пуста.")
         return
@@ -1704,6 +1760,7 @@ async def learning_review(message: Message, command: CommandObject) -> None:
         return
     saved = learning_store.review(
         event_id=parts[0],
+        chat_id=message.chat.id,
         reviewer_id=str(message.from_user.id),
         approved=parts[1] == "approved",
         correction=parts[2] if len(parts) == 3 else None,
@@ -1718,7 +1775,7 @@ async def learning_export(message: Message, command: CommandObject) -> None:
         await message.answer("Команда доступна администраторам.")
         return
     export_path = os.getenv("LEARNING_EXPORT_PATH", "data/learning.jsonl")
-    count = learning_store.export_jsonl(export_path)
+    count = learning_store.export_jsonl(export_path, chat_id=message.chat.id)
     _audit(message, "learning_export", f"count={count}")
     await message.answer(f"Экспортировано одобренных примеров: {count}.")
 
