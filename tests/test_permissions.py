@@ -16,16 +16,18 @@ def test_tags_are_case_insensitive_and_support_at_sign() -> None:
 
 def test_main_admin_is_bound_to_numeric_user_id(monkeypatch) -> None:
     monkeypatch.setenv("MAIN_ADMIN_USER_ID", "1001")
-    assert is_main_admin("@Sholomon", user_id=1001)
+    assert is_main_admin("@operator", user_id=1001)
     assert is_main_admin("@renamed_account", user_id="1001")
-    assert not is_main_admin("@Sholomon", user_id=1002)
-    assert not is_main_admin("@Sholomon")
+    assert not is_main_admin("@operator", user_id=1002)
+    assert not is_main_admin("@operator")
 
 
 def test_chat_access_is_separate_and_revoke_is_stable_by_user_id(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("MAIN_ADMIN_USER_ID", "1")
     store = ChatAccessStore(tmp_path / "access.sqlite3")
-    assert store.is_allowed(1, user_id=1, username="Sholomon")
+    assert store.is_allowed(1, user_id=1, username="operator")
+    assert not store.grant(1, username="operator", user_id=1, granted_by=1)
+    assert not store.revoke(1, username="operator", user_id=1, revoked_by=1)
     assert not store.is_allowed(1, user_id=2, username="Alice")
     assert store.grant(1, username="Alice", user_id=2, granted_by=1)
     assert store.is_allowed(1, user_id=2, username="Alice")

@@ -636,7 +636,7 @@ def help_text() -> str:
         "  Оценки: correct, incorrect или needs_review.\n\n"
         "/chat_reset — очистить память разговорного диалога в текущем чате.\n\n"
         "Реакции бота на сообщения доверенных пользователей настраиваются через REACTIONS_ENABLED, REACTION_EMOJIS и REACTION_MODE.\n\n"
-        "Команды Главного администратора @Sholomon:\n"
+        "Команды Главного администратора:\n"
         "/grant @username [viewer|checker|reviewer|manager] — выдать доступ.\n"
         "/revoke @username — отозвать доступ пользователя в текущем чате.\n"
         "/trusted — показать доверенных пользователей текущего чата.\n"
@@ -1089,7 +1089,7 @@ async def license_command(message: Message, command: CommandObject) -> None:
 @router.message(Command("license_add"))
 async def license_add_command(message: Message, command: CommandObject) -> None:
     if not _is_root(message) or license_store is None:
-        await message.answer("Команда доступна Главному администратору @Sholomon.")
+        await message.answer("Команда доступна Главному администратору.")
         return
     parts = (command.args or "").split(maxsplit=3)
     if len(parts) < 3:
@@ -1139,7 +1139,7 @@ async def license_monitor_command(message: Message, command: CommandObject) -> N
 @router.message(Command("audit"))
 async def audit_command(message: Message) -> None:
     if not _is_root(message) or audit_store is None:
-        await message.answer("Команда доступна Главному администратору @Sholomon.")
+        await message.answer("Команда доступна Главному администратору.")
         return
     rows = audit_store.recent(message.chat.id)
     if not rows:
@@ -1461,7 +1461,7 @@ async def check_all(message: Message) -> None:
     """Повторно проверяет все уникальные организации, сохранённые в истории."""
 
     if not _is_root(message):
-        await message.answer("Команда доступна Главному администратору @Sholomon.")
+        await message.answer("Команда доступна Главному администратору.")
         return
     if not message.from_user or agent is None or history_store is None:
         await message.answer("Массовая проверка сейчас недоступна: хранилище не настроено.")
@@ -1746,7 +1746,7 @@ def _requested_role(command: CommandObject) -> str:
 @router.message(Command("grant"))
 async def grant_access(message: Message, command: CommandObject) -> None:
     if not _is_root(message) or not message.from_user or access_store is None:
-        await message.answer("Команда доступна Главному администратору @Sholomon.")
+        await message.answer("Команда доступна Главному администратору.")
         return
     tag, target_id = _target_user(message, command)
     if not tag:
@@ -1768,7 +1768,7 @@ async def grant_access(message: Message, command: CommandObject) -> None:
 @router.message(Command("revoke"))
 async def revoke_access(message: Message, command: CommandObject) -> None:
     if not _is_root(message) or not message.from_user or access_store is None:
-        await message.answer("Команда доступна Главному администратору @Sholomon.")
+        await message.answer("Команда доступна Главному администратору.")
         return
     tag, target_id = _target_user(message, command)
     if not tag:
@@ -1789,13 +1789,13 @@ async def revoke_access(message: Message, command: CommandObject) -> None:
 @router.message(Command("trusted"))
 async def trusted_users(message: Message) -> None:
     if not _is_root(message) or access_store is None:
-        await message.answer("Команда доступна Главному администратору @Sholomon.")
+        await message.answer("Команда доступна Главному администратору.")
         return
     users = access_store.list_trusted(message.chat.id)
     if not users:
-        await message.answer("В этом чате нет выданных прав. Главный администратор: @Sholomon.")
+        await message.answer("В этом чате нет выданных прав. Главный администратор назначен в конфигурации бота.")
         return
-    lines = ["Доверенные пользователи этого чата:", "@Sholomon — Главный администратор"]
+    lines = ["Доверенные пользователи этого чата:", "Главный администратор — системная роль"]
     lines.extend(f"@{user.tag} — {user.role}" for user in users)
     await message.answer("\n".join(lines))
 

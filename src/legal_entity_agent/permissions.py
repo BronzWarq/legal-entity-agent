@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-MAIN_ADMIN_TAG = "sholomon"
-
 
 def normalize_tag(value: str) -> str:
     return value.strip().lstrip("@").casefold()
@@ -44,8 +42,9 @@ def is_main_admin(username: str | None = None, *, user_id: int | str | None = No
 class AccessPolicy:
     """Первый слой доступа Telegram по username-тегам.
 
-    В рабочей версии рекомендуется дополнительно закрепить Telegram user_id:
-    username пользователь может изменить, а user_id является стабильным.
+    Этот класс оставлен для совместимости с локальными правилами тегов.
+    Главный администратор определяется отдельно по неизменяемому Telegram
+    user_id и не зависит от username.
     """
 
     def __init__(self, allowed_tags: frozenset[str], admin_tags: frozenset[str] = frozenset()) -> None:
@@ -78,7 +77,7 @@ class ChatAccessStore:
         bootstrap_tags: frozenset[str] = frozenset(),
     ) -> None:
         self.path = str(path)
-        self.bootstrap_tags = bootstrap_tags - {MAIN_ADMIN_TAG}
+        self.bootstrap_tags = bootstrap_tags
         self._lock = threading.RLock()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -164,7 +163,7 @@ class ChatAccessStore:
         role: str = "checker",
     ) -> bool:
         tag = normalize_tag(username)
-        if not tag or tag == MAIN_ADMIN_TAG:
+        if not tag or is_main_admin(user_id=user_id):
             return False
         if role not in {"viewer", "checker", "reviewer", "manager"}:
             return False
@@ -194,7 +193,7 @@ class ChatAccessStore:
         revoked_by: int | str,
     ) -> bool:
         tag = normalize_tag(username)
-        if not tag or tag == MAIN_ADMIN_TAG:
+        if not tag or is_main_admin(user_id=user_id):
             return False
         now = self._now()
         with self._lock, self._connection:
