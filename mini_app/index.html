@@ -2,36 +2,46 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Налог — компании</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
       --ink: var(--tg-theme-text-color, #18213d);
       --muted: var(--tg-theme-hint-color, #697592);
-      --page: var(--tg-theme-bg-color, #f7f8ff);
-      --panel: rgba(255,255,255,.78);
+      --page: var(--tg-theme-bg-color, #f4f7fb);
+      --panel: rgba(255,255,255,.82);
       --panel: color-mix(in srgb, var(--tg-theme-secondary-bg-color, #fff) 78%, transparent);
-      --line: rgba(105, 119, 180, .18);
-      --accent: #6257f5;
+      --section: var(--tg-theme-section-bg-color, var(--tg-theme-secondary-bg-color, #fff));
+      --control: var(--tg-theme-secondary-bg-color, #eef2f7);
+      --line: var(--tg-theme-section-separator-color, rgba(105, 119, 180, .18));
+      --accent: var(--tg-theme-button-color, #2481cc);
+      --accent-text: var(--tg-theme-button-text-color, #fff);
       --accent-2: #16c4d9;
+      --link: var(--tg-theme-link-color, #2481cc);
+      --danger: var(--tg-theme-destructive-text-color, #df3f61);
+      --safe-top: var(--tg-safe-area-inset-top, 0px);
+      --safe-bottom: var(--tg-safe-area-inset-bottom, 0px);
       --pink: #f05ac8;
-      --shadow: 0 18px 48px rgba(47, 42, 116, .14);
+      --shadow: 0 14px 38px rgba(47, 42, 116, .1);
       --display-font: Impact, Haettenschweiler, "Arial Narrow Bold", "Arial Narrow", sans-serif;
-      --button-radius: 17px;
-      color-scheme: light;
+      --button-radius: 12px;
+      color-scheme: light dark;
     }
     * { box-sizing: border-box; }
     body {
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
       margin: 0;
-      padding: 14px;
+      padding: calc(var(--safe-top) + 12px) 12px calc(var(--safe-bottom) + 16px);
       color: var(--ink);
+      background: var(--page);
       background:
-        radial-gradient(circle at 0% 0%, rgba(22,196,217,.22), transparent 30%),
-        radial-gradient(circle at 100% 12%, rgba(240,90,200,.18), transparent 34%),
-        linear-gradient(145deg, #f9fbff 0%, var(--page) 52%, #f4f1ff 100%);
+        radial-gradient(circle at 0% 0%, color-mix(in srgb, var(--accent-2) 14%, transparent), transparent 29%),
+        radial-gradient(circle at 100% 12%, color-mix(in srgb, var(--pink) 10%, transparent), transparent 32%),
+        linear-gradient(145deg, color-mix(in srgb, var(--page) 94%, white), var(--page) 52%, color-mix(in srgb, var(--page) 91%, var(--accent) 9%));
       min-height: 100vh;
+      min-height: 100dvh;
+      -webkit-font-smoothing: antialiased;
     }
     body::before {
       content: "";
@@ -39,7 +49,7 @@
       inset: 0;
       z-index: -1;
       pointer-events: none;
-      opacity: .34;
+      opacity: .22;
       background-image: radial-gradient(rgba(98,87,245,.12) 1px, transparent 1px);
       background-size: 18px 18px;
       mask-image: linear-gradient(to bottom, #000, transparent 72%);
@@ -47,11 +57,11 @@
     .hero {
       position: relative;
       overflow: hidden;
-      border-radius: 28px;
-      padding: 20px;
+      border-radius: 24px;
+      padding: 18px;
       color: #fff;
       background: linear-gradient(135deg, #10153f 0%, #34217e 45%, #008ebc 100%);
-      box-shadow: 0 20px 44px rgba(31, 30, 103, .28);
+      box-shadow: 0 18px 40px rgba(31, 30, 103, .22);
       isolation: isolate;
     }
     .hero::before, .hero::after { content: ""; position: absolute; border-radius: 999px; z-index: -1; }
@@ -66,60 +76,78 @@
     .hero-chip::before { content: "●"; margin-right: 4px; color: #70f5cc; }
     .hero p { position: relative; z-index: 1; margin: 17px 0 0; max-width: 340px; color: rgba(255,255,255,.82); font-size: 13px; line-height: 1.5; }
     .hero-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; position: relative; z-index: 1; }
-    .hero-meta span { padding: 5px 8px; border-radius: 8px; background: rgba(255,255,255,.11); color: rgba(255,255,255,.72); font-size: 10px; }
+    .hero-meta span { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border-radius: 8px; background: rgba(255,255,255,.11); color: rgba(255,255,255,.72); font-size: 10px; }
+    .hero-meta span::first-letter { color: rgba(255,255,255,.95); }
     .panel {
       position: relative;
       background: var(--panel);
-      border: 1px solid rgba(255,255,255,.72);
-      border-radius: 22px;
+      border: 1px solid rgba(255,255,255,.62);
+      border-radius: 20px;
       padding: 16px;
-      margin-top: 14px;
+      margin-top: 12px;
       box-shadow: var(--shadow);
       backdrop-filter: blur(16px);
     }
     .panel > strong { display: flex; align-items: center; gap: 8px; font-family: var(--display-font); font-size: 15px; font-weight: 400; letter-spacing: .04em; text-transform: uppercase; }
     .panel > strong::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 0 0 5px rgba(98,87,245,.09); }
     .label { font-family: var(--display-font); font-size: 11px; font-weight: 400; letter-spacing: .08em; color: var(--muted); margin: 0 0 7px; display: block; text-transform: uppercase; }
-    input, button { width: 100%; box-sizing: border-box; padding: 13px; margin: 6px 0; border-radius: 14px; border: 1px solid var(--line); font: inherit; }
-    input { background: rgba(255,255,255,.75); color: var(--ink); outline-color: var(--accent); box-shadow: inset 0 1px 0 rgba(255,255,255,.8); }
-    input::placeholder { color: #8b94ad; }
-    input:focus { border-color: rgba(98,87,245,.52); box-shadow: 0 0 0 4px rgba(98,87,245,.12); outline: none; }
-    button { appearance: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 48px; position: relative; overflow: hidden; background: linear-gradient(135deg, #5950eb 0%, #327fe7 54%, #13bfd4 100%); color: #fff; border: 1px solid rgba(255,255,255,.3); border-radius: var(--button-radius); font-family: var(--display-font); font-size: .92rem; font-weight: 400; letter-spacing: .075em; line-height: 1.05; text-transform: uppercase; box-shadow: 0 7px 0 rgba(53,48,148,.2), 0 13px 24px rgba(77,75,201,.22), inset 0 1px 0 rgba(255,255,255,.34); transition: transform .16s ease, box-shadow .16s ease, filter .16s ease; }
-    button::after { content: ""; position: absolute; inset: 1px; border: 1px solid rgba(255,255,255,.14); border-radius: calc(var(--button-radius) - 1px); pointer-events: none; }
-    button:hover { filter: saturate(1.15) brightness(1.05); box-shadow: 0 9px 0 rgba(53,48,148,.18), 0 16px 28px rgba(77,75,201,.3), inset 0 1px 0 rgba(255,255,255,.4); transform: translateY(-2px); }
-    button:active { transform: translateY(4px) scale(.985); box-shadow: 0 2px 0 rgba(53,48,148,.18), 0 6px 12px rgba(77,75,201,.2), inset 0 1px 0 rgba(255,255,255,.25); }
-    button:focus-visible { outline: 3px solid rgba(22,196,217,.52); outline-offset: 3px; }
-    button.secondary { background: linear-gradient(135deg, rgba(255,255,255,.88), rgba(224,231,255,.66)); color: #5148d9; border: 1px solid rgba(98,87,245,.24); box-shadow: 0 5px 0 rgba(98,87,245,.1), 0 10px 20px rgba(98,87,245,.11), inset 0 1px 0 rgba(255,255,255,.88); }
-    button.secondary::after { border-color: rgba(98,87,245,.1); }
-    button.secondary:hover { background: linear-gradient(135deg, rgba(255,255,255,.98), rgba(220,235,255,.82)); box-shadow: 0 7px 0 rgba(98,87,245,.1), 0 14px 24px rgba(98,87,245,.17), inset 0 1px 0 rgba(255,255,255,.95); }
-    button.danger { background: linear-gradient(135deg, #e64d75, #f36b9b); box-shadow: 0 5px 0 rgba(147,35,73,.18), 0 10px 18px rgba(212,61,111,.2), inset 0 1px 0 rgba(255,255,255,.32); }
-    button.compact { width: auto; min-width: 70px; min-height: 38px; padding: 8px 11px; margin: 0 0 0 4px; border-radius: 12px; font-size: .72rem; letter-spacing: .055em; }
-    .button-icon { display: inline-grid; place-items: center; width: 1.55em; height: 1.55em; flex: 0 0 1.55em; border: 1px solid rgba(255,255,255,.28); border-radius: 50%; background: rgba(255,255,255,.16); font-family: ui-sans-serif, system-ui, sans-serif; font-size: .9em; letter-spacing: 0; line-height: 1; }
-    button.secondary .button-icon { border-color: rgba(81,72,217,.18); background: rgba(98,87,245,.1); }
+    input, button { width: 100%; box-sizing: border-box; padding: 13px; margin: 6px 0; border-radius: var(--button-radius); border: 1px solid var(--line); font: inherit; }
+    input { min-height: 50px; background: var(--control); color: var(--ink); outline-color: var(--accent); box-shadow: inset 0 1px 0 rgba(255,255,255,.42); }
+    input::placeholder { color: var(--muted); opacity: .82; }
+    input:focus { border-color: color-mix(in srgb, var(--accent) 56%, transparent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent); outline: none; }
+    button { appearance: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 50px; position: relative; overflow: hidden; background: var(--accent); color: var(--accent-text); border: 0; border-radius: var(--button-radius); font-family: var(--display-font); font-size: .92rem; font-weight: 400; letter-spacing: .065em; line-height: 1.05; text-transform: uppercase; box-shadow: 0 5px 14px color-mix(in srgb, var(--accent) 23%, transparent); transition: transform .16s ease, box-shadow .16s ease, filter .16s ease; }
+    button::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--ink); opacity: 0; pointer-events: none; transition: opacity .15s ease; }
+    button:hover { filter: saturate(1.08); box-shadow: 0 8px 18px color-mix(in srgb, var(--accent) 28%, transparent); transform: translateY(-1px); }
+    button:hover::after { opacity: .06; }
+    button:active { transform: scale(.975); box-shadow: 0 2px 7px color-mix(in srgb, var(--accent) 18%, transparent); }
+    button:active::after { opacity: .11; }
+    button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent-2) 58%, transparent); outline-offset: 3px; }
+    button.secondary { background: color-mix(in srgb, var(--accent) 11%, var(--control)); color: var(--link); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); box-shadow: none; }
+    button.secondary::after { background: var(--accent); }
+    button.secondary:hover { background: color-mix(in srgb, var(--accent) 16%, var(--control)); box-shadow: none; }
+    button.danger { background: color-mix(in srgb, var(--danger) 14%, var(--control)); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent); box-shadow: none; }
+    button.danger::after { background: var(--danger); }
+    button.compact { width: auto; min-width: 70px; min-height: 36px; padding: 8px 10px; margin: 0 0 0 4px; border-radius: 10px; font-size: .7rem; letter-spacing: .045em; }
+    button.compact.danger { width: 36px; min-width: 36px; padding: 8px; }
+    .button-icon { display: inline-grid; place-items: center; width: 1.55em; height: 1.55em; flex: 0 0 1.55em; border: 1px solid color-mix(in srgb, currentColor 22%, transparent); border-radius: 50%; background: color-mix(in srgb, currentColor 12%, transparent); font-family: ui-sans-serif, system-ui, sans-serif; font-size: .9em; letter-spacing: 0; line-height: 1; }
+    button.secondary .button-icon, button.danger .button-icon { background: color-mix(in srgb, currentColor 10%, transparent); }
     .muted { color: var(--muted); font-size: .86em; }
     .button-help { margin: -2px 2px 9px; color: var(--muted); font-size: .76em; line-height: 1.35; }
     .email-actions .button-help { grid-column: 1 / -1; margin-top: -2px; }
     .button-block { margin-bottom: 8px; }
     .button-block:last-child { margin-bottom: 0; }
-    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: .86em; }
-    th, td { text-align: left; padding: 10px 4px; border-bottom: 1px solid rgba(105,119,180,.18); }
+    table { width: 100%; border-collapse: separate; border-spacing: 0 7px; margin-top: 6px; font-size: .86em; }
+    th, td { text-align: left; padding: 10px 5px; border: 0; }
     th { color: var(--muted); font-family: var(--display-font); font-weight: 400; font-size: .78em; text-transform: uppercase; letter-spacing: .08em; }
-    td:last-child { text-align: right; }
+    tbody tr { background: var(--section); box-shadow: 0 1px 0 rgba(0,0,0,.025); }
+    tbody td:first-child { max-width: 0; overflow-wrap: anywhere; font-weight: 650; border-radius: 13px 0 0 13px; }
+    tbody td:nth-child(2) { white-space: nowrap; }
+    tbody td:last-child { text-align: right; border-radius: 0 13px 13px 0; }
+    .state-chip { display: inline-block; max-width: 110px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; padding: 5px 7px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--link); font-family: var(--display-font); font-size: .69rem; font-weight: 400; letter-spacing: .04em; text-transform: uppercase; }
+    .empty-state { padding: 20px 12px; color: var(--muted); text-align: center; line-height: 1.45; border-radius: 13px; background: var(--section); }
     .small { width: auto; padding: 7px 9px; margin: 0 0 0 4px; }
-    .email-card { border-color: rgba(22,196,217,.26); background: linear-gradient(135deg, rgba(255,255,255,.68), rgba(22,196,217,.1)); }
+    .email-card { border-color: color-mix(in srgb, var(--accent-2) 28%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--section) 86%, transparent), color-mix(in srgb, var(--accent-2) 10%, transparent)); }
     .email-input { margin-top: 4px; }
     .email-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .email-actions button { margin: 0; }
+    .action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .action-grid .button-block { min-width: 0; }
+    .action-grid .button-help { min-height: 2.7em; }
     #result { margin: 14px 2px 0; padding: 0 4px; color: var(--muted); white-space: pre-wrap; font: inherit; font-size: .82em; }
-    .app-footer { margin: 20px 4px 4px; text-align: center; color: var(--muted); font-size: .78em; line-height: 1.4; }
-    .app-footer a { color: var(--accent); font-weight: 800; text-decoration: none; }
+    .app-footer { margin: 18px 4px 4px; text-align: center; color: var(--muted); font-size: .78em; line-height: 1.4; }
+    .app-footer a { color: var(--link); font-family: var(--display-font); font-weight: 400; letter-spacing: .04em; text-decoration: none; }
     .app-footer a:hover, .app-footer a:focus-visible { text-decoration: underline; }
     @media (max-width: 520px) {
-      body { padding: 10px; }
+      body { padding-left: 10px; padding-right: 10px; }
       .hero { padding: 17px; border-radius: 23px; }
       .hero-chip { font-size: 9px; }
       .email-actions { grid-template-columns: 1fr; }
+      .action-grid { grid-template-columns: 1fr; }
+      .action-grid .button-help { min-height: 0; }
       .panel { padding: 14px; }
+      table { font-size: .8em; }
+      th, td { padding-left: 3px; padding-right: 3px; }
+      .state-chip { max-width: 88px; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
@@ -133,7 +161,7 @@
       <span class="hero-chip">online</span>
     </div>
     <p><strong>Проверка ON.</strong> Следите за компаниями, ловите изменения и держите важные сведения под контролем.</p>
-    <div class="hero-meta"><span>⚡ ФНС data</span><span>🛡️ privacy first</span><span>✨ без лишнего шума</span></div>
+    <div class="hero-meta"><span>✓ ФНС-проверка</span><span>◉ мониторинг</span><span>↗ Telegram API</span></div>
   </section>
   <section class="panel email-card">
     <strong>Email-уведомления</strong>
@@ -154,17 +182,19 @@
   <section class="panel">
     <label class="label" for="query">Реквизиты или описание компании</label>
     <input id="query" placeholder="ИНН, ОГРН, КПП или название">
-    <div class="button-block">
+    <div class="button-block action-primary">
       <button id="check"><span class="button-icon" aria-hidden="true">✓</span><span>Проверить компанию</span></button>
       <p class="button-help">Запустить разовую проверку введённых реквизитов.</p>
     </div>
-    <div class="button-block">
-      <button id="add" class="secondary"><span class="button-icon" aria-hidden="true">+</span><span>Добавить в мониторинг</span></button>
-      <p class="button-help">Сохранить компанию для будущих автоматических проверок.</p>
-    </div>
-    <div class="button-block">
-      <button id="shareList" class="secondary"><span class="button-icon" aria-hidden="true">↗</span><span>Поделиться списком в этом чате</span></button>
-      <p class="button-help">Передать список другому пользователю этого чата для добавления в его MiniApp.</p>
+    <div class="action-grid">
+      <div class="button-block">
+        <button id="add" class="secondary"><span class="button-icon" aria-hidden="true">+</span><span>Добавить в мониторинг</span></button>
+        <p class="button-help">Сохранить компанию для будущих автоматических проверок.</p>
+      </div>
+      <div class="button-block">
+        <button id="shareList" class="secondary"><span class="button-icon" aria-hidden="true">↗</span><span>Поделиться списком в этом чате</span></button>
+        <p class="button-help">Передать список другому пользователю этого чата для добавления в его MiniApp.</p>
+      </div>
     </div>
     <div class="button-block">
       <button id="exportExcel" class="secondary"><span class="button-icon" aria-hidden="true">⇩</span><span>Выгрузить результат в Excel</span></button>
@@ -183,6 +213,8 @@
   <script>
     const tg = window.Telegram?.WebApp;
     tg?.ready();
+    tg?.setHeaderColor?.('bg_color');
+    tg?.setBackgroundColor?.('bg_color');
     const params = new URLSearchParams(window.location.search);
     const telegramUserId = tg?.initDataUnsafe?.user?.id;
     const initChatId = tg?.initDataUnsafe?.chat?.id;
@@ -234,17 +266,38 @@
     const render = () => {
       const body = document.querySelector('#companies');
       body.innerHTML = '';
+      if (!getRows().length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 3;
+        td.className = 'empty-state';
+        td.textContent = 'Компании появятся здесь после проверки или добавления в мониторинг.';
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+      }
       getRows().forEach((row, index) => {
         const tr = document.createElement('tr');
         const name = document.createElement('td'); name.textContent = row.query;
-        const state = document.createElement('td'); state.textContent = row.state || 'добавлена';
+        const state = document.createElement('td');
+        const stateChip = document.createElement('span');
+        stateChip.className = 'state-chip';
+        stateChip.textContent = row.state || 'добавлена';
+        state.appendChild(stateChip);
         tr.append(name, state);
         const td = document.createElement('td');
-        const check = document.createElement('button'); check.textContent = 'Проверить'; check.className = 'compact';
+        const check = document.createElement('button');
+        check.className = 'compact';
+        const checkIcon = document.createElement('span'); checkIcon.className = 'button-icon'; checkIcon.setAttribute('aria-hidden', 'true'); checkIcon.textContent = '✓';
+        check.append(checkIcon, 'Проверить');
         check.title = `Проверить компанию: ${row.query}`;
         check.setAttribute('aria-label', `Проверить компанию ${row.query}`);
         check.onclick = () => send('check', row.query);
-        const remove = document.createElement('button'); remove.textContent = '×'; remove.setAttribute('aria-label', `Удалить компанию ${row.query} из мониторинга`); remove.title = `Удалить компанию ${row.query} из мониторинга`; remove.className = 'compact danger';
+        const remove = document.createElement('button');
+        remove.className = 'compact danger';
+        const removeIcon = document.createElement('span'); removeIcon.className = 'button-icon'; removeIcon.setAttribute('aria-hidden', 'true'); removeIcon.textContent = '×';
+        remove.appendChild(removeIcon);
+        remove.setAttribute('aria-label', `Удалить компанию ${row.query} из мониторинга`); remove.title = `Удалить компанию ${row.query} из мониторинга`;
         remove.onclick = () => { send('unwatch', row.query); rows.splice(index, 1); persistRows(); render(); };
         td.append(check, remove); tr.appendChild(td); body.appendChild(tr);
       });
