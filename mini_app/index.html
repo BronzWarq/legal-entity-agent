@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
   <title>Налог — компании</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
@@ -216,10 +217,12 @@
     tg?.setHeaderColor?.('bg_color');
     tg?.setBackgroundColor?.('bg_color');
     const params = new URLSearchParams(window.location.search);
+    const fragmentParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
     const telegramUserId = tg?.initDataUnsafe?.user?.id;
     const initChatId = tg?.initDataUnsafe?.chat?.id;
     const urlChatId = params.get('chat_id');
     const telegramChatId = initChatId || urlChatId;
+    const launchContext = fragmentParams.get('context') || params.get('context');
     const apiUrl = params.get('api_url');
     const transport = params.get('transport') || 'api';
     const chatKey = telegramChatId || `private:${telegramUserId || 'anonymous'}`;
@@ -320,6 +323,19 @@
         document.querySelector('#result').textContent = 'Не удалось связаться с ботом: API Mini App не настроен.';
         return;
       }
+      if (!window.crypto?.randomUUID && !window.crypto?.getRandomValues) {
+        document.querySelector('#result').textContent = 'Защищённый режим Mini App недоступен в этом окружении.';
+        return;
+      }
+      const requestId = window.crypto?.randomUUID
+        ? window.crypto.randomUUID()
+        : Array.from(window.crypto.getRandomValues(new Uint32Array(4))).map(value => value.toString(16)).join('-');
+      const requestPayload = {
+        ...payload,
+        chat_id: telegramChatId,
+        request_id: requestId,
+      };
+      if (launchContext) requestPayload.context = launchContext;
       try {
         const response = await fetch(apiUrl, {
           method: 'POST',
@@ -327,7 +343,7 @@
             'Content-Type': 'application/json',
             'X-Telegram-Init-Data': tg.initData,
           },
-          body: JSON.stringify({ ...payload, chat_id: telegramChatId }),
+          body: JSON.stringify(requestPayload),
         });
         const result = await response.json().catch(() => ({}));
         if (!response.ok || !result.ok) throw new Error(result.error || 'сервер отклонил запрос');

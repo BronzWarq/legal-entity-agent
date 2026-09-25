@@ -1,0 +1,52 @@
+# Рекомендуемый шаблон для api.bronzarena.club.
+#
+# Важно: директива limit_req_zone должна находиться внутри общего блока http{}
+# в /etc/nginx/nginx.conf или в подключаемом из него файле.
+#
+# limit_req_zone $binary_remote_addr zone=mini_app_api_by_ip:10m rate=30r/m;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name api.bronzarena.club;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name api.bronzarena.club;
+
+    # Заполнить актуальными путями сертификатов после выпуска сертификата.
+    # ssl_certificate /etc/letsencrypt/live/api.bronzarena.club/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/api.bronzarena.club/privkey.pem;
+
+    client_max_body_size 32k;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "DENY" always;
+
+    location = /mini-app-api {
+        limit_req zone=mini_app_api_by_ip burst=10 nodelay;
+        limit_req_status 429;
+
+        limit_except POST OPTIONS {
+            deny all;
+        }
+
+        proxy_pass http://127.0.0.1:8081;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 65s;
+        proxy_send_timeout 65s;
+        proxy_buffering off;
+    }
+
+    location / {
+        return 404;
+    }
+}

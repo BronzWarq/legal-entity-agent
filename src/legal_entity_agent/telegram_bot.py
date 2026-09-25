@@ -44,9 +44,10 @@ from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
 from .licenses import LicenseStore, new_license
 from .local_registry import LocalEgrulClient
+from .mini_app_security import MiniAppContextStore, MiniAppRateLimiter, MiniAppSecurityError
 from .models import SearchQuery
 from .notifications import EmailSubscriptionStore, SmtpConfig, normalize_email, send_email
-from .permissions import ChatAccessStore, is_main_admin, normalize_tag
+from .permissions import ChatAccessStore, configured_main_admin_user_id, is_main_admin, normalize_tag
 from .reactions import ReactionSettings
 from .render import format_assessment
 from .shared_lists import SharedListStore
@@ -69,6 +70,32 @@ batch_jobs = BatchJobRegistry()
 batch_tasks: dict[str, asyncio.Task[None]] = {}
 MAX_SHARED_MINI_APP_URL_LENGTH = 3500
 MINI_APP_API_PATH = "/mini-app-api"
+MINI_APP_CONTEXT_TTL_SECONDS = 900
+MINI_APP_ACTIONS = frozenset(
+    {
+        "check",
+        "watch",
+        "unwatch",
+        "export_excel",
+        "share_list",
+        "set_email",
+        "remove_email",
+        "batch_cancel",
+        "batch_status",
+    }
+)
+MINI_APP_EXPENSIVE_ACTIONS = frozenset({"check", "export_excel", "share_list", "batch_cancel", "batch_status"})
+MINI_APP_MAX_QUERY_LENGTH = 500
+MINI_APP_MAX_EMAIL_LENGTH = 254
+MINI_APP_MAX_JOB_ID_LENGTH = 128
+_MINI_APP_BOT_KEY = web.AppKey("mini_app_bot", Bot)
+_MINI_APP_BOT_TOKEN_KEY = web.AppKey("mini_app_bot_token", str)
+_MINI_APP_CONTEXT_STORE_KEY = web.AppKey("mini_app_context_store", MiniAppContextStore)
+_MINI_APP_RATE_LIMITER_KEY = web.AppKey("mini_app_rate_limiter", MiniAppRateLimiter)
+_MINI_APP_EXPENSIVE_RATE_LIMITER_KEY = web.AppKey("mini_app_expensive_rate_limiter", MiniAppRateLimiter)
+_MINI_APP_SEMAPHORE_KEY = web.AppKey("mini_app_semaphore", asyncio.Semaphore)
+
+mini_app_context_store = MiniAppContextStore()
 
 BOT_MENU_ACTIONS = frozenset(
     {
@@ -108,15 +135,29 @@ def _mini_app_api_url() -> str:
 def _mini_app_link(
     *,
     chat_id: int | str | None = None,
+    chat_type: str | None = None,
     shared_queries: list[str] | None = None,
     transport: str = "api",
 ) -> str:
-    """Возвращает ссылку Mini App с контекстом задания и чата, если он задан."""
+    """Возвращает ссылку Mini App с непрозрачным контекстом чата.
+
+    Для API-сценария ``chat_id`` может оставаться в URL только для UI и
+    совместимости, но не является источником авторизации. Сервер выдаёт
+    короткоживущий launch-контекст, который хранится только внутри процесса
+    бота; каждый запрос дополнительно получает одноразовый ``request_id``.
+    """
 
     url = _mini_app_url()
     if not url:
         return url
     params: list[str] = []
+    context_token = ""
+    if chat_id is not None and transport == "api" and _mini_app_api_url():
+        context_token = mini_app_context_store.issue(
+            chat_id,
+            chat_type=chat_type,
+            ttl_seconds=_positive_env_int("MINI_APP_CONTEXT_TTL_SECONDS", MINI_APP_CONTEXT_TTL_SECONDS),
+        )
     if chat_id is not None:
         params.append(f"chat_id={quote(str(chat_id), safe='')}")
     if shared_queries:
@@ -127,17 +168,30 @@ def _mini_app_link(
         params.append(f"api_url={quote(api_url, safe='')}")
     params.append(f"transport={quote(transport, safe='')}")
     if not params:
-        return url
-    separator = "&" if "?" in url else "?"
-    return f"{url}{separator}{'&'.join(params)}"
+        result = url
+    else:
+        separator = "&" if "?" in url else "?"
+        result = f"{url}{separator}{'&'.join(params)}"
+    if not context_token:
+        return result
+    base, hash_marker, existing_fragment = result.partition("#")
+    fragment_parts = [existing_fragment] if existing_fragment else []
+    fragment_parts.append(f"context={quote(context_token, safe='')}")
+    return f"{base}{hash_marker or '#'}{'&'.join(fragment_parts)}"
 
 
 def _mini_app_keyboard(
     *,
     chat_id: int | str | None = None,
+    chat_type: str | None = None,
     shared_queries: list[str] | None = None,
 ) -> InlineKeyboardMarkup | None:
-    url = _mini_app_link(chat_id=chat_id, shared_queries=shared_queries, transport="api")
+    url = _mini_app_link(
+        chat_id=chat_id,
+        chat_type=chat_type,
+        shared_queries=shared_queries,
+        transport="api",
+    )
     if not url:
         return None
     return InlineKeyboardMarkup(
@@ -148,6 +202,7 @@ def _mini_app_keyboard(
 def _mini_app_reply_keyboard(
     *,
     chat_id: int | str | None = None,
+    chat_type: str | None = None,
 ) -> ReplyKeyboardMarkup | None:
     """Возвращает клавиатуру запуска Mini App для личного чата.
 
@@ -156,7 +211,7 @@ def _mini_app_reply_keyboard(
     для открытия приложения в группах, но не создаёт ``web_app_data``-сообщение.
     """
 
-    url = _mini_app_link(chat_id=chat_id, transport="web_app_data")
+    url = _mini_app_link(chat_id=chat_id, chat_type=chat_type, transport="web_app_data")
     if not url:
         return None
     return ReplyKeyboardMarkup(
@@ -170,9 +225,9 @@ def _mini_app_reply_keyboard(
 class _MiniAppMessage:
     """Минимальный контекст сообщения для действий, пришедших по HTTPS API."""
 
-    def __init__(self, bot: Bot, chat_id: int, user, payload: dict) -> None:
+    def __init__(self, bot: Bot, chat_id: int, chat_type: str, user, payload: dict) -> None:
         self.bot = bot
-        self.chat = SimpleNamespace(id=chat_id, type="group")
+        self.chat = SimpleNamespace(id=chat_id, type=chat_type)
         self.from_user = user
         self.web_app_data = SimpleNamespace(data=json.dumps(payload, ensure_ascii=False))
 
@@ -189,8 +244,11 @@ def _verify_mini_app_init_data(init_data: str, bot_token: str):
     if not init_data or len(init_data) > 8192:
         raise ValueError("Пустые или слишком длинные initData")
     pairs = parse_qsl(init_data, keep_blank_values=True)
+    keys = [key for key, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise ValueError("В initData обнаружены повторяющиеся поля")
     received_hash = next((value for key, value in pairs if key == "hash"), "")
-    if not received_hash:
+    if len(received_hash) != 64 or any(character not in "0123456789abcdefABCDEF" for character in received_hash):
         raise ValueError("В initData отсутствует подпись Telegram")
     check_string = "\n".join(f"{key}={value}" for key, value in sorted(pairs) if key != "hash")
     secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
@@ -201,15 +259,105 @@ def _verify_mini_app_init_data(init_data: str, bot_token: str):
     try:
         auth_date = int(values["auth_date"])
         user_data = json.loads(values["user"])
+        if not isinstance(user_data, dict):
+            raise ValueError("Данные пользователя Telegram имеют некорректный формат")
         user_id = int(user_data["id"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("В initData отсутствуют данные пользователя Telegram") from exc
     now = int(datetime.now(UTC).timestamp())
-    max_age = _positive_env_int("MINI_APP_INIT_DATA_MAX_AGE_SECONDS", 86400)
-    if auth_date > now + 300 or now - auth_date > max_age:
+    configured_max_age = _positive_env_int("MINI_APP_INIT_DATA_MAX_AGE_SECONDS", 600)
+    hard_max_age = _positive_env_int("MINI_APP_INIT_DATA_HARD_MAX_AGE_SECONDS", 900)
+    max_age = min(configured_max_age, hard_max_age)
+    clock_skew = min(_positive_env_int("MINI_APP_INIT_DATA_CLOCK_SKEW_SECONDS", 60), 300)
+    if auth_date > now + clock_skew or now - auth_date > max_age:
         raise ValueError("Срок действия initData Telegram истёк")
     username = user_data.get("username")
-    return SimpleNamespace(id=user_id, username=username if isinstance(username, str) else None)
+    signed_chat_id = None
+    raw_chat = values.get("chat")
+    if raw_chat:
+        try:
+            chat_data = json.loads(raw_chat)
+            if isinstance(chat_data, dict) and "id" in chat_data:
+                signed_chat_id = int(chat_data["id"])
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("Данные чата Telegram имеют некорректный формат") from exc
+    return SimpleNamespace(
+        id=user_id,
+        username=username if isinstance(username, str) else None,
+        signed_chat_id=signed_chat_id,
+        chat_type=values.get("chat_type") if isinstance(values.get("chat_type"), str) else None,
+        chat_instance=values.get("chat_instance") if isinstance(values.get("chat_instance"), str) else None,
+    )
+
+
+def _validate_mini_app_payload(payload: object, *, require_context: bool = False) -> dict:
+    """Validate and normalize the small allow-listed Mini App command schema."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("Некорректное тело запроса Mini App")
+    allowed_fields = {"action", "query", "queries", "email", "job_id", "context", "request_id", "chat_id"}
+    unknown_fields = set(payload) - allowed_fields
+    if unknown_fields:
+        raise ValueError("Mini App передал неизвестные поля")
+    action = payload.get("action")
+    if not isinstance(action, str) or action not in MINI_APP_ACTIONS:
+        raise ValueError("Неизвестное действие Mini App")
+    normalized: dict = {"action": action}
+
+    if action in {"check", "watch", "unwatch"}:
+        query = payload.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("Mini App не передал запрос компании")
+        query = " ".join(query.split())
+        if len(query) > MINI_APP_MAX_QUERY_LENGTH:
+            raise ValueError("Запрос компании слишком длинный")
+        normalized["query"] = query
+    elif action in {"export_excel", "share_list"}:
+        raw_queries = payload.get("queries")
+        if not isinstance(raw_queries, list) or len(raw_queries) > 100:
+            raise ValueError("Mini App передал некорректный список компаний")
+        queries: list[str] = []
+        seen: set[str] = set()
+        for raw_query in raw_queries:
+            if not isinstance(raw_query, str):
+                raise ValueError("Mini App передал некорректный список компаний")
+            query = " ".join(raw_query.split())
+            if not query or len(query) > MINI_APP_MAX_QUERY_LENGTH:
+                raise ValueError("Одна из записей списка компаний некорректна")
+            key = query.casefold()
+            if key not in seen:
+                seen.add(key)
+                queries.append(query)
+        normalized["queries"] = queries
+    elif action == "set_email":
+        email = payload.get("email")
+        if not isinstance(email, str) or not email.strip() or len(email.strip()) > MINI_APP_MAX_EMAIL_LENGTH:
+            raise ValueError("Адрес электронной почты некорректен")
+        normalized["email"] = email.strip()
+    elif action in {"batch_cancel", "batch_status"}:
+        job_id = payload.get("job_id")
+        if not isinstance(job_id, str) or not job_id.strip() or len(job_id.strip()) > MINI_APP_MAX_JOB_ID_LENGTH:
+            raise ValueError("Идентификатор задания некорректен")
+        normalized["job_id"] = job_id.strip()
+
+    if "chat_id" in payload:
+        try:
+            normalized["chat_id"] = int(payload["chat_id"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Идентификатор чата некорректен") from exc
+    if "context" in payload:
+        context = payload["context"]
+        if not isinstance(context, str) or not context or len(context) > 256:
+            raise ValueError("Контекст Mini App некорректен")
+        normalized["context"] = context
+    if "request_id" in payload:
+        request_id = payload["request_id"]
+        if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
+            raise ValueError("Идентификатор запроса некорректен")
+        normalized["request_id"] = request_id
+    if require_context and ("context" not in normalized or "request_id" not in normalized):
+        raise MiniAppSecurityError("Запрос не содержит защищённого контекста Mini App")
+    return normalized
 
 
 def _mini_app_allowed_origin() -> str:
@@ -235,22 +383,62 @@ async def _mini_app_cors_middleware(request: web.Request, handler):
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Telegram-Init-Data"
         response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
         response.headers["Vary"] = "Origin"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 
 async def _mini_app_api(request: web.Request) -> web.Response:
     try:
-        user = _verify_mini_app_init_data(request.headers.get("X-Telegram-Init-Data", ""), request.app["bot_token"])
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise ValueError("Некорректное тело запроса Mini App")
+        user = _verify_mini_app_init_data(
+            request.headers.get("X-Telegram-Init-Data", ""), request.app[_MINI_APP_BOT_TOKEN_KEY]
+        )
+        payload = _validate_mini_app_payload(await request.json(), require_context=True)
+        context_token = payload.pop("context")
+        request_id = payload.pop("request_id")
         raw_chat_id = payload.pop("chat_id", None)
-        chat_id = int(raw_chat_id)
+        context = request.app[_MINI_APP_CONTEXT_STORE_KEY].resolve(context_token)
+        if raw_chat_id is not None and raw_chat_id != context.chat_id:
+            raise MiniAppSecurityError("Контекст чата не совпадает с launch-контекстом")
+        if user.signed_chat_id is not None and user.signed_chat_id != context.chat_id:
+            raise MiniAppSecurityError("Подписанный Telegram-контекст чата не совпадает")
+        action = payload["action"]
+        limiter: MiniAppRateLimiter = request.app[_MINI_APP_RATE_LIMITER_KEY]
+        rate_keys = (
+            f"user:{user.id}",
+            f"user:{user.id}:chat:{context.chat_id}",
+        )
+        if not limiter.allow_all(*rate_keys):
+            response = web.json_response(
+                {"ok": False, "error": "Слишком много запросов. Повторите попытку позже."}, status=429
+            )
+            response.headers["Retry-After"] = str(limiter.window_seconds)
+            return response
+        if action in MINI_APP_EXPENSIVE_ACTIONS:
+            expensive_limiter: MiniAppRateLimiter = request.app[_MINI_APP_EXPENSIVE_RATE_LIMITER_KEY]
+            if not expensive_limiter.allow_all(*rate_keys):
+                response = web.json_response(
+                    {"ok": False, "error": "Слишком много ресурсоёмких операций. Повторите попытку позже."},
+                    status=429,
+                )
+                response.headers["Retry-After"] = str(expensive_limiter.window_seconds)
+                return response
+        if not request.app[_MINI_APP_CONTEXT_STORE_KEY].claim_request(context_token, request_id):
+            return web.json_response(
+                {"ok": False, "error": "Этот запрос уже обработан или устарел."}, status=409
+            )
+    except MiniAppSecurityError as exc:
+        logging.warning("Отклонён небезопасный запрос Mini App: %s", exc)
+        return web.json_response({"ok": False, "error": "Контекст Mini App недействителен или устарел."}, status=401)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=400)
     try:
-        message = _MiniAppMessage(request.app["bot"], chat_id, user, payload)
-        await mini_app_data(message)
+        message = _MiniAppMessage(
+            request.app[_MINI_APP_BOT_KEY], context.chat_id, context.chat_type, user, payload
+        )
+        async with request.app[_MINI_APP_SEMAPHORE_KEY]:
+            await mini_app_data(message)
     except Exception:
         logging.exception("Ошибка обработки команды Mini App через API")
         return web.json_response({"ok": False, "error": "Команда не обработана сервером."}, status=500)
@@ -262,9 +450,20 @@ async def _start_mini_app_api(bot: Bot, bot_token: str):
 
     if not _mini_app_api_url():
         return None
-    app = web.Application(client_max_size=128 * 1024, middlewares=[_mini_app_cors_middleware])
-    app["bot"] = bot
-    app["bot_token"] = bot_token
+    max_body_bytes = min(_positive_env_int("MINI_APP_API_MAX_BODY_BYTES", 32 * 1024), 128 * 1024)
+    app = web.Application(client_max_size=max_body_bytes, middlewares=[_mini_app_cors_middleware])
+    app[_MINI_APP_BOT_KEY] = bot
+    app[_MINI_APP_BOT_TOKEN_KEY] = bot_token
+    app[_MINI_APP_CONTEXT_STORE_KEY] = mini_app_context_store
+    app[_MINI_APP_RATE_LIMITER_KEY] = MiniAppRateLimiter(
+        limit=_positive_env_int("MINI_APP_RATE_LIMIT_PER_MINUTE", 30),
+        window_seconds=_positive_env_int("MINI_APP_RATE_LIMIT_WINDOW_SECONDS", 60),
+    )
+    app[_MINI_APP_EXPENSIVE_RATE_LIMITER_KEY] = MiniAppRateLimiter(
+        limit=_positive_env_int("MINI_APP_EXPENSIVE_RATE_LIMIT_PER_MINUTE", 8),
+        window_seconds=_positive_env_int("MINI_APP_RATE_LIMIT_WINDOW_SECONDS", 60),
+    )
+    app[_MINI_APP_SEMAPHORE_KEY] = asyncio.Semaphore(_positive_env_int("MINI_APP_MAX_CONCURRENT_REQUESTS", 8))
     app.router.add_post(MINI_APP_API_PATH, _mini_app_api)
     app.router.add_options(MINI_APP_API_PATH, _mini_app_api)
     runner = web.AppRunner(app)
@@ -288,11 +487,11 @@ async def _open_check_mini_app(message: Message) -> None:
     # Mini App открытым после отправки действия; старый sendData()-сценарий
     # оставляем резервным вариантом для установок без API.
     if _mini_app_api_url():
-        keyboard = _mini_app_keyboard(chat_id=message.chat.id)
+        keyboard = _mini_app_keyboard(chat_id=message.chat.id, chat_type=message.chat.type)
     elif message.chat.type == "private":
-        keyboard = _mini_app_reply_keyboard(chat_id=message.chat.id)
+        keyboard = _mini_app_reply_keyboard(chat_id=message.chat.id, chat_type=message.chat.type)
     else:
-        keyboard = _mini_app_keyboard(chat_id=message.chat.id)
+        keyboard = _mini_app_keyboard(chat_id=message.chat.id, chat_type=message.chat.type)
     if keyboard is None:
         await message.answer("Mini App пока не опубликован: задайте MINI_APP_URL.")
         return
@@ -357,7 +556,10 @@ def _allowed_user(chat_id: int, user) -> bool:
 
 
 def _is_root(message: Message) -> bool:
-    return bool(message.from_user and is_main_admin(message.from_user.username))
+    return bool(
+        message.from_user
+        and is_main_admin(message.from_user.username, user_id=message.from_user.id)
+    )
 
 
 async def _react_to_message(message: Message, bot: Bot) -> None:
@@ -469,7 +671,7 @@ def skills_text() -> str:
 
 @router.message(CommandStart())
 async def start(message: Message, bot: Bot) -> None:
-    url = _mini_app_link(chat_id=message.chat.id)
+    url = _mini_app_link(chat_id=message.chat.id, chat_type=message.chat.type)
     if url:
         try:
             await bot.set_chat_menu_button(
@@ -504,7 +706,7 @@ async def menu_command(message: Message) -> None:
 
 @router.message(Command("app"))
 async def app_command(message: Message, bot: Bot) -> None:
-    url = _mini_app_link(chat_id=message.chat.id)
+    url = _mini_app_link(chat_id=message.chat.id, chat_type=message.chat.type)
     if not url:
         await message.answer("Mini App пока не опубликован: задайте MINI_APP_URL.")
         return
@@ -569,7 +771,7 @@ async def _run_check(message: Message, raw_query: str) -> None:
     if agent is None:
         await message.answer("Проверка сейчас недоступна: агент не настроен.")
         return
-    mini_app_keyboard = _mini_app_keyboard(chat_id=message.chat.id)
+    mini_app_keyboard = _mini_app_keyboard(chat_id=message.chat.id, chat_type=message.chat.type)
     if mini_app_keyboard:
         await message.answer(
             "Для проверки и дальнейшего управления результатом можно открыть Mini App:",
@@ -667,7 +869,7 @@ async def feedback_callback(callback: CallbackQuery) -> None:
         event_id=parts[1],
         actor_id=str(callback.from_user.id),
         label=label,
-        is_admin=is_main_admin(callback.from_user.username),
+        is_admin=is_main_admin(callback.from_user.username, user_id=callback.from_user.id),
     )
     _audit(callback.message, "feedback_added", f"label={label.value}")
     await callback.answer("Спасибо, оценка сохранена." if saved else "Запись не найдена.", show_alert=not saved)
@@ -692,7 +894,7 @@ async def feedback_command(message: Message, command: CommandObject) -> None:
         actor_id=str(message.from_user.id),
         label=label,
         note=parts[2] if len(parts) == 3 else None,
-        is_admin=is_main_admin(message.from_user.username),
+        is_admin=is_main_admin(message.from_user.username, user_id=message.from_user.id),
     )
     _audit(message, "feedback_added", f"label={label.value}")
     await message.answer("Обратная связь сохранена." if saved else "Запись не найдена или недоступна.")
@@ -1209,7 +1411,7 @@ async def _start_batch_job(message: Message, queries: list[SearchQuery], *, sour
     await message.answer(
         f"Запускаю последовательную проверку {len(queries)} компаний. "
         f"Задание: {job.job_id}. Для просмотра состояния используйте /batch_status.",
-        reply_markup=_mini_app_keyboard(chat_id=message.chat.id),
+        reply_markup=_mini_app_keyboard(chat_id=message.chat.id, chat_type=message.chat.type),
     )
     task = asyncio.create_task(_run_batch_job(job, message))
     batch_tasks[job.job_id] = task
@@ -1319,8 +1521,9 @@ async def mini_app_data(message: Message) -> None:
     if not message.web_app_data:
         return
     try:
-        payload = __import__("json").loads(message.web_app_data.data)
-    except (TypeError, ValueError):
+        payload = _validate_mini_app_payload(json.loads(message.web_app_data.data))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        logging.info("Отклонены данные Mini App: %s", exc)
         await message.answer("Mini App передал некорректные данные.")
         return
     action = payload.get("action")
@@ -1448,14 +1651,22 @@ async def shared_list_callback(callback: CallbackQuery) -> None:
         await callback.answer("У вас нет разрешения на проверки в этом чате.", show_alert=True)
         return
     shared_queries = list(shared.queries)
-    shared_url = _mini_app_link(chat_id=callback.message.chat.id, shared_queries=shared_queries)
+    shared_url = _mini_app_link(
+        chat_id=callback.message.chat.id,
+        chat_type=callback.message.chat.type,
+        shared_queries=shared_queries,
+    )
     if len(shared_url) > MAX_SHARED_MINI_APP_URL_LENGTH:
         await callback.answer(
             "Список слишком большой для передачи одной кнопкой. Удалите лишние компании и повторите попытку.",
             show_alert=True,
         )
         return
-    keyboard = _mini_app_keyboard(chat_id=callback.message.chat.id, shared_queries=shared_queries)
+    keyboard = _mini_app_keyboard(
+        chat_id=callback.message.chat.id,
+        chat_type=callback.message.chat.type,
+        shared_queries=shared_queries,
+    )
     if keyboard is None:
         await callback.answer("Mini App пока не опубликован.", show_alert=True)
         return
@@ -1847,6 +2058,10 @@ async def _run() -> None:
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("Не задан BOT_TOKEN в .env")
+    if configured_main_admin_user_id() is None:
+        raise RuntimeError(
+            "Не задан MAIN_ADMIN_USER_ID: укажите числовой Telegram user_id главного администратора."
+        )
     hash_salt = os.getenv("LEARNING_HASH_SALT", "").strip()
     if not hash_salt:
         raise RuntimeError("Не задан LEARNING_HASH_SALT: укажите стабильную случайную соль для защиты идентификаторов.")

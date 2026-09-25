@@ -19,6 +19,8 @@ def test_mini_app_monitoring_controls_update_server_state() -> None:
     assert "initDataUnsafe?.user?.id" in html
     assert "initDataUnsafe?.chat?.id" in html
     assert "params.get('chat_id')" in html
+    assert "fragmentParams.get('context')" in html
+    assert "request_id" in html
     assert "const storageKey" in html
     assert "const persistRows" in html
     assert "const rememberQuery" in html
@@ -42,7 +44,7 @@ def test_mini_app_link_carries_chat_context() -> None:
     bot_source = (ROOT / "src" / "legal_entity_agent" / "telegram_bot.py").read_text(encoding="utf-8")
 
     assert "chat_id: int | str | None = None" in bot_source
-    assert "_mini_app_keyboard(chat_id=message.chat.id)" in bot_source
+    assert "_mini_app_keyboard(chat_id=message.chat.id, chat_type=message.chat.type)" in bot_source
     assert "chat_id={quote(str(chat_id), safe='')}" in bot_source
 
 
@@ -65,10 +67,11 @@ async def test_private_chat_uses_api_web_app_button_when_api_is_configured(monke
     keyboard = answers[0]["reply_markup"]
     assert keyboard is not None
     assert keyboard.inline_keyboard[0][0].text == "Открыть Mini App"
-    assert (
-        keyboard.inline_keyboard[0][0].web_app.url
-        == "https://example.test/mini_app/?chat_id=12345&api_url=https%3A%2F%2Fapi.example.test%2Fmini-app-api&transport=api"
+    url = keyboard.inline_keyboard[0][0].web_app.url
+    assert url.startswith(
+        "https://example.test/mini_app/?chat_id=12345&api_url=https%3A%2F%2Fapi.example.test%2Fmini-app-api&transport=api#context="
     )
+    assert len(url.rsplit("#context=", 1)[1]) >= 32
 
 
 def test_private_chat_keeps_legacy_reply_web_app_fallback(monkeypatch) -> None:

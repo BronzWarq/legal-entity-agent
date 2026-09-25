@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -19,8 +20,25 @@ def parse_tags(value: str | None) -> frozenset[str]:
     return frozenset(normalize_tag(item) for item in value.split(",") if item.strip())
 
 
-def is_main_admin(username: str | None) -> bool:
-    return bool(username) and normalize_tag(username or "") == MAIN_ADMIN_TAG
+def configured_main_admin_user_id() -> str | None:
+    """Return the configured immutable Telegram user id, if valid."""
+
+    value = os.getenv("MAIN_ADMIN_USER_ID", "").strip()
+    if not value.isdigit() or int(value) <= 0:
+        return None
+    return value
+
+
+def is_main_admin(username: str | None = None, *, user_id: int | str | None = None) -> bool:
+    """Check the main administrator by immutable Telegram user id.
+
+    The username remains an argument for compatibility with older call sites,
+    but it is intentionally not an authentication factor.  A missing or
+    malformed ``MAIN_ADMIN_USER_ID`` fails closed.
+    """
+
+    expected_user_id = configured_main_admin_user_id()
+    return expected_user_id is not None and user_id is not None and str(user_id) == expected_user_id
 
 
 class AccessPolicy:
@@ -96,7 +114,7 @@ class ChatAccessStore:
             self._connection.close()
 
     def is_allowed(self, chat_id: int | str, *, user_id: int | str | None, username: str | None) -> bool:
-        if is_main_admin(username):
+        if is_main_admin(username, user_id=user_id):
             return True
         tag = normalize_tag(username or "") if username else ""
         user_key = str(user_id) if user_id is not None else None
@@ -124,7 +142,7 @@ class ChatAccessStore:
         return bool(tag and tag in self.bootstrap_tags)
 
     def role_for(self, chat_id: int | str, *, user_id: int | str | None, username: str | None) -> str | None:
-        if is_main_admin(username):
+        if is_main_admin(username, user_id=user_id):
             return "owner"
         tag = normalize_tag(username or "") if username else ""
         user_key = str(user_id) if user_id is not None else None

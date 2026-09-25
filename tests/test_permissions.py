@@ -14,13 +14,16 @@ def test_tags_are_case_insensitive_and_support_at_sign() -> None:
     assert not policy.is_allowed("unknown")
 
 
-def test_only_sholomon_is_main_admin() -> None:
-    assert is_main_admin("@Sholomon")
-    assert is_main_admin("sholomon")
-    assert not is_main_admin("@admin")
+def test_main_admin_is_bound_to_numeric_user_id(monkeypatch) -> None:
+    monkeypatch.setenv("MAIN_ADMIN_USER_ID", "1001")
+    assert is_main_admin("@Sholomon", user_id=1001)
+    assert is_main_admin("@renamed_account", user_id="1001")
+    assert not is_main_admin("@Sholomon", user_id=1002)
+    assert not is_main_admin("@Sholomon")
 
 
-def test_chat_access_is_separate_and_revoke_is_stable_by_user_id(tmp_path) -> None:
+def test_chat_access_is_separate_and_revoke_is_stable_by_user_id(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MAIN_ADMIN_USER_ID", "1")
     store = ChatAccessStore(tmp_path / "access.sqlite3")
     assert store.is_allowed(1, user_id=1, username="Sholomon")
     assert not store.is_allowed(1, user_id=2, username="Alice")
