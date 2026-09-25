@@ -1,11 +1,16 @@
+from datetime import datetime
+
 import httpx
 import pytest
 
 from legal_entity_agent.fns_client import (
-    FnsBlockedError,
     FnsEgrulClient,
+    FnsError,
+    FnsFallbackClient,
     FnsNotFoundError,
+    FnsTransientError,
 )
+from legal_entity_agent.models import FnsEntityRecord, SearchQuery
 
 
 def _client(handler):
@@ -36,11 +41,11 @@ async def test_lookup_parses_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lookup_rejects_captcha() -> None:
+async def test_lookup_rejects_unsupported_response() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="CAPTCHA")
+        return httpx.Response(200, text="неподдерживаемый ответ")
 
-    with pytest.raises(FnsBlockedError):
+    with pytest.raises(FnsError, match="JSON"):
         await _client(handler).lookup("7707083893")
 
 
@@ -68,3 +73,23 @@ async def test_lookup_accepts_free_text_query() -> None:
     record = await _client(handler).lookup("ООО Ромашка, Москва")
     assert record.name == "ООО Ромашка"
     assert "query=%D0%9E%D0%9E%D0%9E" in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_fallback_client_uses_local_record_after_primary_error() -> None:
+    record = FnsEntityRecord(
+        query=SearchQuery("7707083893"),
+        source_url="https://www.nalog.gov.ru/rn77/service/egrip2/",
+        fetched_at=datetime.now(),
+        inn="7707083893",
+    )
+
+    class Primary:
+        async def lookup(self, value):
+            raise FnsTransientError("источник недоступен")
+
+    class Fallback:
+        async def lookup(self, value):
+            return record
+
+    assert await FnsFallbackClient(Primary(), Fallback()).lookup("7707083893") is record

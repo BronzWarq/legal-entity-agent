@@ -100,16 +100,6 @@
     th { color: var(--muted); font-weight: 700; font-size: .78em; text-transform: uppercase; letter-spacing: .04em; }
     td:last-child { text-align: right; }
     .small { width: auto; padding: 7px 9px; margin: 0 0 0 4px; }
-    .captcha-card { border-color: rgba(22,196,217,.26); background: linear-gradient(135deg, rgba(22,196,217,.1), rgba(98,87,245,.1)); }
-    .captcha-status { display: flex; gap: 9px; align-items: flex-start; margin: 9px 0 13px; }
-    .captcha-icon { display: inline-grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; border-radius: 10px; background: linear-gradient(135deg, rgba(98,87,245,.16), rgba(22,196,217,.18)); font-size: 1.1rem; }
-    .captcha-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .captcha-actions .button-block button { margin: 0; }
-    .captcha-actions .button-block:last-child { grid-column: 1 / -1; }
-    .fns-frame-wrap { display: none; margin-top: 12px; overflow: hidden; border: 1px solid rgba(98,87,245,.24); border-radius: 16px; background: #fff; }
-    .fns-frame-wrap.visible { display: block; }
-    .fns-frame { width: 100%; height: min(62vh, 620px); display: block; border: 0; background: #fff; }
-    .frame-note { margin: 8px 0 0; padding: 0 8px 8px; font-size: .78em; color: var(--muted); line-height: 1.35; }
     .email-card { border-color: rgba(22,196,217,.26); background: linear-gradient(135deg, rgba(255,255,255,.68), rgba(22,196,217,.1)); }
     .email-input { margin-top: 4px; }
     .email-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -122,8 +112,7 @@
       body { padding: 10px; }
       .hero { padding: 17px; border-radius: 23px; }
       .hero-chip { font-size: 9px; }
-      .email-actions, .captcha-actions { grid-template-columns: 1fr; }
-      .captcha-actions .button-block:last-child { grid-column: auto; }
+      .email-actions { grid-template-columns: 1fr; }
       .panel { padding: 14px; }
     }
     @media (prefers-reduced-motion: reduce) {
@@ -174,43 +163,6 @@
     <div class="button-block">
       <button id="exportExcel" class="secondary">Выгрузить результат в Excel</button>
       <p class="button-help">Скачать результаты проверок компаний из текущего списка в формате .xlsx.</p>
-    </div>
-  </section>
-  <section class="panel captcha-card">
-    <strong>Пакетная проверка и CAPTCHA</strong>
-    <div class="captcha-status">
-      <span class="captcha-icon" aria-hidden="true">🛡️</span>
-      <p class="muted" style="margin:0">Если очередь остановилась, введите ID задания. Эта панель управляет очередью и показывает статус; CAPTCHA отображается внутри Mini App только при наличии официального виджета ФНС.</p>
-    </div>
-    <label class="label" for="batchId">ID пакетного задания</label>
-    <input id="batchId" placeholder="Например, aBc123..." autocomplete="off">
-    <div class="captcha-actions">
-      <div class="button-block">
-        <button id="batchStatus" class="secondary">Обновить статус</button>
-        <p class="button-help">Показать текущую компанию и состояние очереди.</p>
-      </div>
-      <div class="button-block">
-        <button id="captchaDone">Подтвердить CAPTCHA</button>
-        <p class="button-help">Сообщить боту, что CAPTCHA пройдена вручную.</p>
-      </div>
-      <div class="button-block">
-        <button id="batchCancel" class="danger">Отменить очередь</button>
-        <p class="button-help">Остановить пакетную проверку и очистить ожидание.</p>
-      </div>
-    </div>
-    <div class="button-block">
-      <button id="openFns" class="secondary">Открыть веб‑версию ФНС здесь</button>
-      <p class="button-help">Открыть официальную страницу ФНС для ручного ввода CAPTCHA.</p>
-    </div>
-    <div id="fnsFrameWrap" class="fns-frame-wrap">
-      <iframe
-        id="fnsFrame"
-        class="fns-frame"
-        title="Официальная веб-версия ФНС"
-        src="https://pb.nalog.ru/"
-        loading="lazy"
-        referrerpolicy="no-referrer"></iframe>
-      <p class="frame-note">CAPTCHA вводится вручную на официальной странице ФНС. Mini App не получает и не передаёт CAPTCHA‑токены.</p>
     </div>
   </section>
   <section class="panel">
@@ -272,8 +224,6 @@
       }
     };
     const importedRows = importSharedRows();
-    const initialJobId = params.get('job_id');
-    if (initialJobId) document.querySelector('#batchId').value = initialJobId;
     const getRows = () => rows;
     const render = () => {
       const body = document.querySelector('#companies');
@@ -301,9 +251,7 @@
       else if (action === 'set_email') payload.email = value;
       else if (action === 'share_list') payload.queries = rows.map(row => row.query);
       else if (action !== 'remove_email') payload.job_id = value;
-      const confirmationText = action === 'captcha_done'
-        ? 'Подтверждение передано боту. Очередь продолжится после ответа ФНС.'
-        : 'Команда передана боту. Ответ появится в чате.';
+      const confirmationText = 'Команда передана боту. Ответ появится в чате.';
       if (transport === 'web_app_data' && tg?.sendData) {
         tg.sendData(JSON.stringify(payload));
         document.querySelector('#result').textContent = confirmationText;
@@ -352,10 +300,6 @@
       }
       send('export_excel');
     };
-    const batchValue = () => document.querySelector('#batchId').value.trim();
-    document.querySelector('#batchStatus').onclick = () => send('batch_status', batchValue());
-    document.querySelector('#captchaDone').onclick = () => send('captcha_done', batchValue());
-    document.querySelector('#batchCancel').onclick = () => send('batch_cancel', batchValue());
     document.querySelector('#saveEmail').onclick = () => {
       const input = document.querySelector('#notificationEmail');
       const email = input.value.trim();
@@ -363,13 +307,6 @@
       send('set_email', email);
     };
     document.querySelector('#removeEmail').onclick = () => send('remove_email', 'remove');
-    document.querySelector('#openFns').onclick = () => {
-      const frame = document.querySelector('#fnsFrameWrap');
-      frame.classList.toggle('visible');
-      document.querySelector('#openFns').textContent = frame.classList.contains('visible')
-        ? 'Скрыть веб‑версию ФНС'
-        : 'Открыть веб‑версию ФНС здесь';
-    };
     render();
     if (importedRows) document.querySelector('#result').textContent = `Добавлено компаний из общего списка: ${importedRows}.`;
   </script>

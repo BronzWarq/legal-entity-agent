@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import logging
+from typing import Any, Protocol
 
 import httpx
 
@@ -18,20 +19,46 @@ class FnsTransientError(FnsError):
     """Временная сетевая ошибка, для которой допустим повтор с паузой."""
 
 
-class FnsBlockedError(FnsError):
-    """Сервис запросил CAPTCHA или заблокировал автоматический запрос."""
-
-
 class FnsNotFoundError(FnsError):
     """Поисковый запрос не вернул юридическое лицо."""
+
+
+class FnsLookupClient(Protocol):
+    async def lookup(self, value: str | Identifier | SearchQuery) -> FnsEntityRecord: ...
+
+
+class FnsFallbackClient:
+    """Сначала обращается к ФНС, затем читает официальный локальный слепок."""
+
+    def __init__(self, primary: FnsLookupClient, fallback) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.logger = logging.getLogger(__name__)
+
+    async def lookup(self, value: str | Identifier | SearchQuery) -> FnsEntityRecord:
+        try:
+            return await self.primary.lookup(value)
+        except FnsNotFoundError:
+            raise
+        except FnsError as primary_error:
+            try:
+                local_record = await self.fallback.lookup(value)
+            except Exception:
+                self.logger.exception("Не удалось выполнить резервный поиск в локальном реестре ФНС")
+                local_record = None
+            if local_record is not None:
+                self.logger.warning("Использован локальный слепок ФНС после ошибки основного источника")
+                return local_record
+            raise primary_error
 
 
 class FnsEgrulClient:
     """Клиент публичного веб-сервиса ЕГРЮЛ/ЕГРИП ФНС.
 
     Сервис ФНС не заявляет этот веб-интерфейс как стабильный API. Поэтому
-    endpoint вынесен в настройки, ответы проверяются консервативно, а CAPTCHA
-    не обходится: в таком случае клиент возвращает FnsBlockedError.
+    endpoint вынесен в настройки, а ответы проверяются консервативно. Если
+    публичный веб-интерфейс вернул неподдерживаемый ответ, проверка завершается
+    ошибкой и не делает вывод об отсутствии сведений.
     """
 
     def __init__(
@@ -68,11 +95,9 @@ class FnsEgrulClient:
             except httpx.HTTPError as exc:
                 raise FnsTransientError(f"Не удалось выполнить запрос к ФНС: {exc}") from exc
 
-            search_payload = self._json_or_blocked(search)
+            search_payload = self._json_payload(search)
             token = search_payload.get("t") or search_payload.get("token")
             if not token:
-                if self._contains_captcha(search.text):
-                    raise FnsBlockedError("ФНС запросила CAPTCHA или ограничила автоматический запрос.")
                 raise FnsError("Формат ответа ФНС не содержит токен результата поиска.")
 
             try:
@@ -81,20 +106,13 @@ class FnsEgrulClient:
             except httpx.HTTPError as exc:
                 raise FnsTransientError(f"Не удалось получить результат поиска ФНС: {exc}") from exc
 
-            payload = self._json_or_blocked(result)
+            payload = self._json_payload(result)
             rows = payload.get("rows") if isinstance(payload, dict) else None
             if rows == [] or (not rows and not self._looks_like_entity(payload)):
                 raise FnsNotFoundError(f"По запросу {query.value} сведения не найдены.")
             return parse_fns_payload(payload, query, str(result.url))
 
-    @staticmethod
-    def _contains_captcha(text: str) -> bool:
-        lowered = text.casefold()
-        return "captcha" in lowered or "капч" in lowered or "проверить, что вы не робот" in lowered
-
-    def _json_or_blocked(self, response: httpx.Response) -> dict[str, Any]:
-        if self._contains_captcha(response.text):
-            raise FnsBlockedError("ФНС запросила CAPTCHA или ограничила автоматический запрос.")
+    def _json_payload(self, response: httpx.Response) -> dict[str, Any]:
         try:
             payload = response.json()
         except (json.JSONDecodeError, ValueError) as exc:

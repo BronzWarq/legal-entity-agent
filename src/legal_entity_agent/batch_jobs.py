@@ -1,14 +1,7 @@
-"""Состояние пакетных проверок и ручного подтверждения CAPTCHA.
-
-Модуль не обращается к сети и не пытается решать CAPTCHA. Он хранит только
-состояние задания в памяти процесса: это позволяет приостановить ровно одну
-очередь и возобновить её после нажатия пользователем кнопки подтверждения.
-Сырые ответы ФНС и данные CAPTCHA сюда не записываются.
-"""
+"""Состояние пакетных проверок в памяти процесса."""
 
 from __future__ import annotations
 
-import asyncio
 import secrets
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -18,7 +11,6 @@ from .models import SearchQuery
 
 class BatchJobState(StrEnum):
     RUNNING = "running"
-    WAITING_CAPTCHA = "waiting_captcha"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
@@ -34,9 +26,6 @@ class BatchJob:
     job_id: str = field(default_factory=lambda: secrets.token_urlsafe(9))
     index: int = 0
     state: BatchJobState = BatchJobState.RUNNING
-    captcha_query: SearchQuery | None = None
-    captcha_review_id: str | None = None
-    _resume_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
     def current_query(self) -> SearchQuery | None:
@@ -44,47 +33,16 @@ class BatchJob:
             return self.queries[self.index]
         return None
 
-    def pause_for_captcha(self, query: SearchQuery, review_id: str | None = None) -> None:
-        """Перевести задание в ожидание ручного прохождения CAPTCHA."""
-
-        self.captcha_query = query
-        self.captcha_review_id = review_id
-        self.state = BatchJobState.WAITING_CAPTCHA
-        self._resume_event.clear()
-
-    async def wait_for_resume(self) -> None:
-        """Ожидать подтверждения пользователя без блокировки polling-цикла."""
-
-        await self._resume_event.wait()
-
-    def resume_after_captcha(self) -> bool:
-        """Разрешить повтор текущего запроса; вернуть False для другой стадии."""
-
-        if self.state is not BatchJobState.WAITING_CAPTCHA:
-            return False
-        self.state = BatchJobState.RUNNING
-        self._resume_event.set()
-        return True
-
-    def clear_captcha_review(self) -> str | None:
-        review_id = self.captcha_review_id
-        self.captcha_query = None
-        self.captcha_review_id = None
-        return review_id
-
     def cancel(self) -> bool:
-        """Отменить ожидающую или выполняющуюся очередь."""
+        """Отменить выполняющуюся очередь."""
 
         if self.state in {BatchJobState.COMPLETED, BatchJobState.CANCELLED}:
             return False
         self.state = BatchJobState.CANCELLED
-        self._resume_event.set()
         return True
 
     def complete(self) -> None:
         self.state = BatchJobState.COMPLETED
-        self.clear_captcha_review()
-        self._resume_event.set()
 
 
 class BatchJobRegistry:

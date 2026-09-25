@@ -33,17 +33,17 @@ from dotenv import load_dotenv
 from .agent import LegalEntityAgent
 from .audit import AuditStore
 from .batch_jobs import BatchJob, BatchJobRegistry, BatchJobState
-from .batch_review import BatchReviewStore
 from .bulk_import import parse_upload
 from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
 from .deep_check import AtomnoFnsCheckAdapter
 from .excel_export import ExcelCheckRow, build_check_workbook, row_from_assessment, row_from_error
-from .fns_client import FnsBlockedError, FnsEgrulClient, FnsError, FnsNotFoundError, FnsTransientError
+from .fns_client import FnsEgrulClient, FnsError, FnsFallbackClient, FnsNotFoundError, FnsTransientError
 from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
 from .licenses import LicenseStore, new_license
+from .local_registry import LocalEgrulClient
 from .models import SearchQuery
 from .notifications import EmailSubscriptionStore, SmtpConfig, normalize_email, send_email
 from .permissions import ChatAccessStore, is_main_admin, normalize_tag
@@ -63,7 +63,6 @@ watch_store: WatchStore | None = None
 shared_list_store: SharedListStore | None = None
 notification_store: EmailSubscriptionStore | None = None
 smtp_config = SmtpConfig(host="")
-batch_review_store: BatchReviewStore | None = None
 chat_skill: ChatSkill | None = None
 reaction_settings = ReactionSettings()
 batch_jobs = BatchJobRegistry()
@@ -108,7 +107,6 @@ def _mini_app_api_url() -> str:
 
 def _mini_app_link(
     *,
-    job_id: str | None = None,
     chat_id: int | str | None = None,
     shared_queries: list[str] | None = None,
     transport: str = "api",
@@ -119,8 +117,6 @@ def _mini_app_link(
     if not url:
         return url
     params: list[str] = []
-    if job_id:
-        params.append(f"job_id={quote(job_id, safe='')}")
     if chat_id is not None:
         params.append(f"chat_id={quote(str(chat_id), safe='')}")
     if shared_queries:
@@ -138,11 +134,10 @@ def _mini_app_link(
 
 def _mini_app_keyboard(
     *,
-    job_id: str | None = None,
     chat_id: int | str | None = None,
     shared_queries: list[str] | None = None,
 ) -> InlineKeyboardMarkup | None:
-    url = _mini_app_link(job_id=job_id, chat_id=chat_id, shared_queries=shared_queries, transport="api")
+    url = _mini_app_link(chat_id=chat_id, shared_queries=shared_queries, transport="api")
     if not url:
         return None
     return InlineKeyboardMarkup(
@@ -152,7 +147,6 @@ def _mini_app_keyboard(
 
 def _mini_app_reply_keyboard(
     *,
-    job_id: str | None = None,
     chat_id: int | str | None = None,
 ) -> ReplyKeyboardMarkup | None:
     """Возвращает клавиатуру запуска Mini App для личного чата.
@@ -162,7 +156,7 @@ def _mini_app_reply_keyboard(
     для открытия приложения в группах, но не создаёт ``web_app_data``-сообщение.
     """
 
-    url = _mini_app_link(job_id=job_id, chat_id=chat_id, transport="web_app_data")
+    url = _mini_app_link(chat_id=chat_id, transport="web_app_data")
     if not url:
         return None
     return ReplyKeyboardMarkup(
@@ -435,9 +429,7 @@ def help_text() -> str:
         "/app — открыть Telegram Mini App (если задан MINI_APP_URL).\n"
         "/check_all (или /check all) — повторно проверить все уникальные юрлица из базы истории (администратор).\n"
         "/batch_status — показать состояние текущей массовой проверки.\n"
-        "/captcha_done ID — продолжить очередь после ручной CAPTCHA.\n"
-        "/batch_cancel ID — отменить ожидающую массовую проверку.\n"
-        "/batch_pending — список компаний, которые требуют ручной проверки или повтора.\n"
+        "/batch_cancel ID — отменить текущую массовую проверку.\n"
         "/feedback ID ОЦЕНКА — отправить оценку результата проверки.\n"
         "  Оценки: correct, incorrect или needs_review.\n\n"
         "/chat_reset — очистить память разговорного диалога в текущем чате.\n\n"
@@ -567,7 +559,7 @@ async def check(message: Message, command: CommandObject) -> None:
     await _open_check_mini_app(message)
 
 
-async def _run_check(message: Message, raw_query: str, *, suppress_blocked_error: bool = False) -> None:
+async def _run_check(message: Message, raw_query: str) -> None:
     if not _can_check(message):
         await message.answer("У вас нет разрешения на выполнение этой команды.")
         return
@@ -595,8 +587,7 @@ async def _run_check(message: Message, raw_query: str, *, suppress_blocked_error
                 learning_store.record_failure(actor_id=str(message.from_user.id), identifier=query, error=str(exc))
             except Exception:
                 logging.exception("Не удалось сохранить ошибку проверки в журнал обучения")
-        if not (suppress_blocked_error and isinstance(exc, FnsBlockedError)):
-            await message.answer(f"Проверка ФНС не выполнена: {exc}")
+        await message.answer(f"Проверка ФНС не выполнена: {exc}")
     except Exception:
         logging.exception("Непредвиденная ошибка одиночной проверки")
         if learning_store and message.from_user and query is not None:
@@ -1054,30 +1045,6 @@ def _bulk_result_line(query: str, event_id: str, result) -> str:
     return f"✅ {title}{details} — {state}; ID проверки: {event_id}"
 
 
-def _captcha_keyboard(job_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ CAPTCHA пройдена — продолжить",
-                    callback_data=f"batch_captcha_resume:{job_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⏹ Отменить пакет",
-                    callback_data=f"batch_captcha_cancel:{job_id}",
-                )
-            ],
-        ]
-    )
-
-
-def _batch_captcha_url() -> str:
-    value = os.getenv("FNS_PUBLIC_CHECK_URL", "https://pb.nalog.ru/").strip()
-    return value if value.startswith("https://") else "https://pb.nalog.ru/"
-
-
 async def _record_batch_failure(job: BatchJob, query: SearchQuery, error: str) -> None:
     if learning_store is None:
         return
@@ -1089,35 +1056,6 @@ async def _record_batch_failure(job: BatchJob, query: SearchQuery, error: str) -
         )
     except Exception:
         logging.exception("Не удалось сохранить ошибку пакетной проверки в журнал обучения")
-
-
-def _batch_review_id(job: BatchJob) -> str:
-    return f"{job.job_id}:{job.index}"
-
-
-def _record_batch_pending(job: BatchJob, query: SearchQuery, reason: str) -> str:
-    review_id = _batch_review_id(job)
-    if batch_review_store:
-        try:
-            batch_review_store.record_pending(
-                review_id=review_id,
-                chat_id=job.chat_id,
-                actor_id=job.actor_id,
-                query_text=query.value,
-                reason=reason,
-                source=job.source,
-            )
-        except Exception:
-            logging.exception("Не удалось сохранить компанию для ручной проверки")
-    return review_id
-
-
-def _resolve_batch_review(job: BatchJob, review_id: str | None = None) -> None:
-    if batch_review_store:
-        try:
-            batch_review_store.resolve(review_id or _batch_review_id(job))
-        except Exception:
-            logging.exception("Не удалось закрыть запись ручной проверки")
 
 
 async def _record_batch_success(message: Message, job: BatchJob, query: SearchQuery, result) -> tuple[str, str]:
@@ -1149,7 +1087,7 @@ async def _record_batch_success(message: Message, job: BatchJob, query: SearchQu
 
 
 async def _run_batch_job(job: BatchJob, message: Message) -> None:
-    """Последовательно выполнить пакет и ждать пользователя на CAPTCHA."""
+    """Последовательно выполнить пакет и собрать единый Excel-отчёт."""
 
     rows = []
     succeeded = 0
@@ -1164,21 +1102,6 @@ async def _run_batch_job(job: BatchJob, message: Message) -> None:
                     if agent is None:
                         raise FnsError("агент не настроен")
                     result = await agent.check(query)
-                except FnsBlockedError:
-                    review_id = _record_batch_pending(job, query, "требуется ручная проверка CAPTCHA")
-                    job.pause_for_captcha(query, review_id)
-                    await message.answer(
-                        f"⏸ Массовая проверка приостановлена на компании {job.index + 1}/{len(job.queries)}.\n"
-                        f"Реквизиты: {query.value}\n\n"
-                        f"ФНС запросила CAPTCHA. Откройте официальный сервис, выполните проверку вручную "
-                        f"для этой компании, затем нажмите кнопку ниже.\n"
-                        f"Источник: {_batch_captcha_url()}\n\n"
-                        f"Запрос не считается проверенным, пока ФНС не вернёт результат.",
-                        reply_markup=_captcha_keyboard(job.job_id),
-                    )
-                    await job.wait_for_resume()
-                    attempt = 0
-                    continue
                 except FnsTransientError as exc:
                     retries = _positive_env_int("BATCH_RETRY_ATTEMPTS", 2)
                     if attempt < retries:
@@ -1192,9 +1115,8 @@ async def _run_batch_job(job: BatchJob, message: Message) -> None:
                         continue
                     failed += 1
                     error = str(exc)
-                    _record_batch_pending(job, query, f"не проверено после повторов: {error}")
                     await _record_batch_failure(job, query, error)
-                    rows.append(row_from_error(query.value, f"требуется ручная проверка: {error}"))
+                    rows.append(row_from_error(query.value, f"проверка не выполнена: {error}"))
                     await message.answer(f"❌ {query.value} — {error}")
                     break
                 except FnsNotFoundError as exc:
@@ -1207,23 +1129,19 @@ async def _run_batch_job(job: BatchJob, message: Message) -> None:
                 except FnsError as exc:
                     failed += 1
                     error = str(exc)
-                    _record_batch_pending(job, query, f"требуется ручная проверка: {error}")
                     await _record_batch_failure(job, query, error)
-                    rows.append(row_from_error(query.value, f"требуется ручная проверка: {error}"))
+                    rows.append(row_from_error(query.value, f"проверка не выполнена: {error}"))
                     await message.answer(f"❌ {query.value} — {error}")
                     break
                 except Exception:
                     logging.exception("Ошибка пакетной проверки %s", query.value)
                     failed += 1
                     error = "внутренняя ошибка проверки"
-                    _record_batch_pending(job, query, error)
                     await _record_batch_failure(job, query, error)
                     rows.append(row_from_error(query.value, error))
                     await message.answer(f"❌ {query.value} — {error}")
                     break
                 else:
-                    _resolve_batch_review(job, job.captcha_review_id)
-                    job.clear_captcha_review()
                     event_id, _report = await _record_batch_success(message, job, query, result)
                     succeeded += 1
                     rows.append(row_from_assessment(result))
@@ -1290,8 +1208,8 @@ async def _start_batch_job(message: Message, queries: list[SearchQuery], *, sour
     )
     await message.answer(
         f"Запускаю последовательную проверку {len(queries)} компаний. "
-        f"Задание: {job.job_id}. При CAPTCHA очередь остановится и продолжится после вашего подтверждения.",
-        reply_markup=_mini_app_keyboard(job_id=job.job_id, chat_id=message.chat.id),
+        f"Задание: {job.job_id}. Для просмотра состояния используйте /batch_status.",
+        reply_markup=_mini_app_keyboard(chat_id=message.chat.id),
     )
     task = asyncio.create_task(_run_batch_job(job, message))
     batch_tasks[job.job_id] = task
@@ -1313,50 +1231,6 @@ def _batch_job_for_message(message: Message, job_id: str = "") -> BatchJob | Non
     return job
 
 
-@router.callback_query(F.data.startswith("batch_captcha_resume:"))
-async def batch_captcha_resume(callback: CallbackQuery) -> None:
-    if not callback.message or not callback.from_user:
-        await callback.answer("Не удалось определить чат.", show_alert=True)
-        return
-    job_id = (callback.data or "").split(":", 1)[1]
-    job = batch_jobs.get(job_id)
-    if (
-        job is None
-        or callback.message.chat.id != job.chat_id
-        or callback.from_user.id != job.actor_id
-        or not _can_check_user(callback.message.chat.id, callback.from_user)
-    ):
-        await callback.answer("У вас нет права продолжить это задание.", show_alert=True)
-        return
-    if job.resume_after_captcha():
-        await callback.answer("Очередь возобновлена.")
-        await callback.message.answer(f"▶️ Повторяю проверку компании {job.index + 1}/{len(job.queries)}.")
-    else:
-        await callback.answer("Это задание уже не ожидает CAPTCHA.", show_alert=True)
-
-
-@router.callback_query(F.data.startswith("batch_captcha_cancel:"))
-async def batch_captcha_cancel(callback: CallbackQuery) -> None:
-    if not callback.message or not callback.from_user:
-        await callback.answer("Не удалось определить чат.", show_alert=True)
-        return
-    job_id = (callback.data or "").split(":", 1)[1]
-    job = batch_jobs.get(job_id)
-    if (
-        job is None
-        or callback.message.chat.id != job.chat_id
-        or callback.from_user.id != job.actor_id
-        or not _can_check_user(callback.message.chat.id, callback.from_user)
-    ):
-        await callback.answer("У вас нет права отменить это задание.", show_alert=True)
-        return
-    if job.cancel():
-        await callback.answer("Пакет отменён.")
-        await callback.message.answer("⏹ Запрошена отмена пакетной проверки.")
-    else:
-        await callback.answer("Задание уже завершено.", show_alert=True)
-
-
 @router.message(Command("batch_status"))
 async def batch_status(message: Message, command: CommandObject) -> None:
     job = _batch_job_for_message(message, (command.args or "").strip())
@@ -1370,18 +1244,6 @@ async def batch_status(message: Message, command: CommandObject) -> None:
     )
 
 
-@router.message(Command("captcha_done"))
-async def captcha_done(message: Message, command: CommandObject) -> None:
-    job = _batch_job_for_message(message, (command.args or "").strip())
-    if job is None:
-        await message.answer("Активной пакетной проверки, ожидающей CAPTCHA, нет.")
-        return
-    if job.resume_after_captcha():
-        await message.answer("▶️ CAPTCHA отмечена как пройденная. Очередь продолжена.")
-    else:
-        await message.answer("Задание сейчас не ожидает CAPTCHA.")
-
-
 @router.message(Command("batch_cancel"))
 async def batch_cancel(message: Message, command: CommandObject) -> None:
     job = _batch_job_for_message(message, (command.args or "").strip())
@@ -1390,29 +1252,6 @@ async def batch_cancel(message: Message, command: CommandObject) -> None:
         return
     job.cancel()
     await message.answer("⏹ Запрошена отмена пакетной проверки.")
-
-
-@router.message(Command("batch_pending"))
-async def batch_pending(message: Message, command: CommandObject) -> None:
-    if not message.from_user or not _can_check(message) or batch_review_store is None:
-        await message.answer("У вас нет разрешения на просмотр ручных проверок.")
-        return
-    try:
-        limit = max(1, min(int((command.args or "20").strip()), 100))
-    except ValueError:
-        limit = 20
-    entries = batch_review_store.list_pending(
-        chat_id=message.chat.id,
-        actor_id=message.from_user.id,
-        is_root=_is_root(message),
-        limit=limit,
-    )
-    if not entries:
-        await message.answer("Компаний, ожидающих ручной проверки или повтора, нет.")
-        return
-    lines = ["Компании, требующие ручной проверки или повтора:"]
-    lines.extend(f"• {entry.review_id} — {entry.query_text} — {entry.reason}" for entry in entries)
-    await _answer_chunks(message, lines)
 
 
 @router.message(Command("check_all", "checkall"))
@@ -1551,7 +1390,7 @@ async def mini_app_data(message: Message) -> None:
                 "Администратору нужно задать SMTP_HOST и SMTP_FROM."
             )
         return
-    if action in {"captcha_done", "batch_cancel", "batch_status"}:
+    if action in {"batch_cancel", "batch_status"}:
         if not message.from_user or not _can_check(message):
             await message.answer("У вас нет разрешения управлять пакетной проверкой.")
             return
@@ -1559,12 +1398,6 @@ async def mini_app_data(message: Message) -> None:
         job = _batch_job_for_message(message, job_id)
         if job is None:
             await message.answer("Активной пакетной проверки с таким ID в этом чате нет.")
-            return
-        if action == "captcha_done":
-            if job.resume_after_captcha():
-                await message.answer("▶️ CAPTCHA отмечена. Повторяю текущую компанию и продолжаю очередь.")
-            else:
-                await message.answer("Задание сейчас не ожидает CAPTCHA.")
             return
         if action == "batch_cancel":
             job.cancel()
@@ -1595,9 +1428,6 @@ async def mini_app_data(message: Message) -> None:
                 "Компания удалена из мониторинга." if removed else "Компания не найдена в мониторинге."
             )
         return
-    # Не скрываем ошибку CAPTCHA/антибот-защиты: при запуске из Mini App
-    # подтверждение в интерфейсе уже показано, поэтому результат или причина
-    # отказа должны обязательно прийти отдельным сообщением в исходный чат.
     await _run_check(message, payload["query"])
 
 
@@ -1774,7 +1604,7 @@ async def _handle_menu_action(message: Message, text: str) -> bool:
     elif action == "📁 Загрузить CSV/XLSX":
         await message.answer(
             "Прикрепите файл CSV или XLSX и добавьте к подписи сообщения «/bulk».\n"
-            "Файл будет обработан последовательно, с остановкой очереди при CAPTCHA."
+            "Файл будет обработан последовательно, а итог будет отправлен в Excel."
         )
     elif action == "👁 Мониторинг":
         await watched_command(message)
@@ -2011,7 +1841,7 @@ async def _run() -> None:
         audit_store, \
         watch_store, \
         shared_list_store
-    global notification_store, smtp_config, batch_review_store, chat_skill
+    global notification_store, smtp_config, chat_skill
     global reaction_settings
     load_dotenv()
     token = os.getenv("BOT_TOKEN")
@@ -2023,10 +1853,15 @@ async def _run() -> None:
     access_store = ChatAccessStore(
         os.getenv("ACCESS_DB_PATH", "data/access.sqlite3"),
     )
-    fns_client = FnsEgrulClient(
+    primary_fns_client = FnsEgrulClient(
         base_url=os.getenv("FNS_BASE_URL", "").strip() or "https://egrul.nalog.ru/",
         timeout=_positive_env_float("FNS_TIMEOUT_SECONDS", 20.0),
     )
+    fns_client = primary_fns_client
+    local_db_path = os.getenv("FNS_LOCAL_DB_PATH", "").strip()
+    if _env_bool("FNS_LOCAL_DB_ENABLED") and local_db_path:
+        fns_client = FnsFallbackClient(primary_fns_client, LocalEgrulClient(local_db_path))
+        logging.info("Локальный слепок ФНС включён как резервный источник: %s", local_db_path)
     deep_checker = None
     if _env_bool("MCP_FNS_CHECK_ENABLED"):
         deep_checker = AtomnoFnsCheckAdapter(
@@ -2049,10 +1884,6 @@ async def _run() -> None:
     shared_list_store = SharedListStore(os.getenv("SHARED_LIST_DB_PATH", "data/shared_lists.sqlite3"))
     notification_store = EmailSubscriptionStore(os.getenv("NOTIFICATION_DB_PATH", "data/notifications.sqlite3"))
     smtp_config = _smtp_config_from_env()
-    batch_review_store = BatchReviewStore(
-        os.getenv("BATCH_REVIEW_DB_PATH", "data/batch_review.sqlite3"),
-        hash_salt=hash_salt,
-    )
     chat_skill = ChatSkill.from_env()
     reaction_settings = ReactionSettings.from_env()
     retention = os.getenv("LEARNING_RETENTION_DAYS", "").strip()
@@ -2095,8 +1926,6 @@ async def _run() -> None:
             shared_list_store.close()
         if notification_store:
             notification_store.close()
-        if batch_review_store:
-            batch_review_store.close()
 
 
 def main() -> None:

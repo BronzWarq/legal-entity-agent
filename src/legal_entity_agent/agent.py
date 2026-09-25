@@ -4,7 +4,7 @@ import logging
 from collections.abc import Awaitable
 from typing import Any
 
-from .fns_client import FnsEgrulClient
+from .fns_client import FnsEgrulClient, FnsLookupClient
 from .identifiers import parse_search_query
 from .models import Assessment, SearchQuery
 
@@ -16,7 +16,7 @@ class LegalEntityAgent:
 
     def __init__(
         self,
-        client: FnsEgrulClient | None = None,
+        client: FnsLookupClient | None = None,
         deep_checker: Any | None = None,
     ) -> None:
         self.client = client or FnsEgrulClient()

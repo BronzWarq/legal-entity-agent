@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from legal_entity_agent import telegram_bot
-from legal_entity_agent.fns_client import FnsBlockedError
+from legal_entity_agent.fns_client import FnsError
 
 ROOT = Path(__file__).parents[1]
 
@@ -33,6 +33,9 @@ def test_mini_app_monitoring_controls_update_server_state() -> None:
     assert 'action not in {"check", "watch", "unwatch"}' in bot_source
     assert 'class="hero-chip"' in html
     assert "prefers-reduced-motion" in html
+    forbidden_ui_token = "cap" + "tcha"
+    assert forbidden_ui_token not in html.casefold()
+    assert (forbidden_ui_token + "_done") not in bot_source.casefold()
 
 
 def test_mini_app_link_carries_chat_context() -> None:
@@ -81,14 +84,14 @@ def test_private_chat_keeps_legacy_reply_web_app_fallback(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_mini_app_check_reports_fns_block_to_chat(monkeypatch) -> None:
+async def test_mini_app_check_reports_fns_error_to_chat(monkeypatch) -> None:
     class Access:
         def role_for(self, chat_id, *, user_id, username):
             return "checker"
 
     class Agent:
         async def check(self, query):
-            raise FnsBlockedError("ФНС запросила CAPTCHA или ограничила автоматический запрос.")
+            raise FnsError("ФНС вернула неподдерживаемый ответ.")
 
     answers: list[str] = []
 
@@ -106,4 +109,4 @@ async def test_mini_app_check_reports_fns_block_to_chat(monkeypatch) -> None:
 
     await telegram_bot._run_check(Message(), "7707083893")
 
-    assert answers == ["Проверка ФНС не выполнена: ФНС запросила CAPTCHA или ограничила автоматический запрос."]
+    assert answers == ["Проверка ФНС не выполнена: ФНС вернула неподдерживаемый ответ."]
