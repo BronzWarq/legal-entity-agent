@@ -36,9 +36,9 @@ from .batch_jobs import BatchJob, BatchJobRegistry, BatchJobState
 from .bulk_import import parse_upload
 from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
+from .dadata_client import DadataClient
 from .deep_check import AtomnoFnsCheckAdapter
 from .excel_export import ExcelCheckRow, build_check_workbook, row_from_assessment, row_from_error
-from .dadata_client import DadataClient
 from .fns_client import (
     FnsCaptchaError,
     FnsEgrulClient,
