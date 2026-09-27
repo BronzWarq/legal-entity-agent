@@ -19,6 +19,10 @@ class FnsTransientError(FnsError):
     """Временная сетевая ошибка, для которой допустим повтор с паузой."""
 
 
+class FnsCaptchaError(FnsError):
+    """ФНС запросила CAPTCHA или временно ограничила автоматический запрос."""
+
+
 class FnsNotFoundError(FnsError):
     """Поисковый запрос не вернул юридическое лицо."""
 
@@ -38,6 +42,10 @@ class FnsFallbackClient:
     async def lookup(self, value: str | Identifier | SearchQuery) -> FnsEntityRecord:
         try:
             return await self.primary.lookup(value)
+        except FnsCaptchaError:
+            # CAPTCHA нельзя трактовать как отсутствие сведений и нельзя
+            # подменять текущей записью из локального слепка.
+            raise
         except FnsNotFoundError:
             raise
         except FnsError as primary_error:
@@ -113,12 +121,22 @@ class FnsEgrulClient:
             return parse_fns_payload(payload, query, str(result.url))
 
     def _json_payload(self, response: httpx.Response) -> dict[str, Any]:
+        raw_text = response.text.casefold()
+        if any(marker in raw_text for marker in ("captcha", "recaptcha", "капч")):
+            raise FnsCaptchaError(
+                "ФНС запросила CAPTCHA или временно ограничила автоматический доступ."
+            )
         try:
             payload = response.json()
         except (json.JSONDecodeError, ValueError) as exc:
             raise FnsError("ФНС вернула ответ, который не удалось разобрать как JSON.") from exc
         if not isinstance(payload, dict):
             raise FnsError("ФНС вернула неожиданный формат ответа.")
+        payload_text = json.dumps(payload, ensure_ascii=False).casefold()
+        if any(marker in payload_text for marker in ("captcha", "recaptcha", "капч")):
+            raise FnsCaptchaError(
+                "ФНС запросила CAPTCHA или временно ограничила автоматический доступ."
+            )
         return payload
 
     @staticmethod
