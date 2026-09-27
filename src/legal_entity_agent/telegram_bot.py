@@ -38,7 +38,14 @@ from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
 from .deep_check import AtomnoFnsCheckAdapter
 from .excel_export import ExcelCheckRow, build_check_workbook, row_from_assessment, row_from_error
-from .fns_client import FnsEgrulClient, FnsError, FnsFallbackClient, FnsNotFoundError, FnsTransientError
+from .fns_client import (
+    FnsCaptchaError,
+    FnsEgrulClient,
+    FnsError,
+    FnsFallbackClient,
+    FnsNotFoundError,
+    FnsTransientError,
+)
 from .history import HistoryEntry, HistoryStore
 from .identifiers import InvalidIdentifier, parse_search_query
 from .learning import FeedbackLabel, LearningStore
@@ -849,7 +856,29 @@ async def _run_check(message: Message, raw_query: str) -> None:
                 )
             except Exception:
                 logging.exception("Не удалось сохранить ошибку проверки в журнал обучения")
-        await message.answer(f"Проверка ФНС не выполнена: {exc}")
+        previous = None
+        if history_store and message.from_user and query is not None:
+            previous = history_store.latest_for_query(
+                chat_id=message.chat.id,
+                actor_id=message.from_user.id,
+                is_root=_is_root(message),
+                query_text=query.value,
+            )
+        if isinstance(exc, FnsCaptchaError):
+            notice = (
+                "Проверка не выполнена: ФНС запросила CAPTCHA или временно ограничила "
+                "автоматический доступ. Этот запрос не считается актуальным результатом."
+            )
+        else:
+            notice = f"Проверка ФНС не выполнена: {exc}"
+        if previous:
+            notice += (
+                "\n\nПоследний подтверждённый результат "
+                f"от {previous.created_at:%d.%m.%Y %H:%M UTC}. "
+                "Он может быть устаревшим и не заменяет новую проверку:\n\n"
+                f"{previous.report}"
+            )
+        await message.answer(notice)
     except Exception:
         logging.exception("Непредвиденная ошибка одиночной проверки")
         if learning_store and message.from_user and query is not None:
