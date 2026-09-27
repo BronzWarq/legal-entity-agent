@@ -38,6 +38,7 @@ from .chat_skill import ChatSkill, ChatSkillError
 from .conversation import NaturalIntent, parse_natural_request
 from .deep_check import AtomnoFnsCheckAdapter
 from .excel_export import ExcelCheckRow, build_check_workbook, row_from_assessment, row_from_error
+from .dadata_client import DadataClient
 from .fns_client import (
     FnsCaptchaError,
     FnsEgrulClient,
@@ -2172,15 +2173,36 @@ async def _run() -> None:
     access_store = ChatAccessStore(
         os.getenv("ACCESS_DB_PATH", "data/access.sqlite3"),
     )
-    primary_fns_client = FnsEgrulClient(
-        base_url=os.getenv("FNS_BASE_URL", "").strip() or "https://egrul.nalog.ru/",
-        timeout=_positive_env_float("FNS_TIMEOUT_SECONDS", 20.0),
-    )
-    fns_client = primary_fns_client
-    local_db_path = os.getenv("FNS_LOCAL_DB_PATH", "").strip()
-    if _env_bool("FNS_LOCAL_DB_ENABLED") and local_db_path:
-        fns_client = FnsFallbackClient(primary_fns_client, LocalEgrulClient(local_db_path))
-        logging.info("Локальный слепок ФНС включён как резервный источник: %s", local_db_path)
+    provider = os.getenv("DATA_PROVIDER", "fns").strip().casefold()
+    if provider == "dadata":
+        api_key = os.getenv("DADATA_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "Для DATA_PROVIDER=dadata не задан DADATA_API_KEY в .env."
+            )
+        fns_client = DadataClient(
+            api_key=api_key,
+            base_url=os.getenv(
+                "DADATA_API_URL",
+                "https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party",
+            ).strip(),
+            timeout=_positive_env_float("DADATA_TIMEOUT_SECONDS", 20.0),
+        )
+        logging.info("Провайдер проверки компаний: DaData")
+    elif provider in {"fns", "fns_web"}:
+        primary_fns_client = FnsEgrulClient(
+            base_url=os.getenv("FNS_BASE_URL", "").strip() or "https://egrul.nalog.ru/",
+            timeout=_positive_env_float("FNS_TIMEOUT_SECONDS", 20.0),
+        )
+        fns_client = primary_fns_client
+        local_db_path = os.getenv("FNS_LOCAL_DB_PATH", "").strip()
+        if _env_bool("FNS_LOCAL_DB_ENABLED") and local_db_path:
+            fns_client = FnsFallbackClient(primary_fns_client, LocalEgrulClient(local_db_path))
+            logging.info("Локальный слепок ФНС включён как резервный источник: %s", local_db_path)
+    else:
+        raise RuntimeError(
+            "DATA_PROVIDER должен быть dadata, fns или fns_web."
+        )
     deep_checker = None
     if _env_bool("MCP_FNS_CHECK_ENABLED"):
         deep_checker = AtomnoFnsCheckAdapter(
