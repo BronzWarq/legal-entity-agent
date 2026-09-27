@@ -59,6 +59,15 @@ def test_history_is_scoped_to_chat_and_user(tmp_path) -> None:
     assert {entry.event_id for entry in store.list_for(chat_id=10, actor_id=999, is_root=True)} == {"one", "two"}
     assert store.get_for(event_id="two", chat_id=10, actor_id=100, is_root=False) is None
     assert store.get_for(event_id="two", chat_id=10, actor_id=999, is_root=True).report == "Итог проверки 2"
+    assert store.latest_for_query(
+        chat_id=10, actor_id=100, is_root=False, query_text=query.value
+    ).event_id == "one"
+    assert store.latest_for_query(
+        chat_id=10, actor_id=999, is_root=False, query_text=query.value
+    ) is None
+    assert store.latest_for_query(
+        chat_id=10, actor_id=999, is_root=True, query_text=query.value
+    ).event_id == "two"
     store.close()
 
 
