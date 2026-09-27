@@ -35,9 +35,8 @@ async def test_lookup_parses_company_and_inaccuracy() -> None:
                                 "status": "ACTIVE",
                                 "registration_date": "2002-01-01",
                             },
-                            "address": {"value": "г Москва"},
-                            "invalid": True,
                             "address": {"value": "г Москва", "invalidity": True},
+                            "invalid": True,
                         },
                     }
                 ]
