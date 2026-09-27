@@ -51,7 +51,8 @@ def _format_deep_report(assessment: Assessment) -> list[str]:
 
 def format_assessment(assessment: Assessment) -> str:
     record = assessment.record
-    lines = ["Проверка юридического лица по данным ФНС", ""]
+    provider_label = "DaData" if "dadata.ru" in record.source_url else "ФНС"
+    lines = [f"Проверка юридического лица по данным {provider_label}", ""]
     if record.name:
         lines.append(f"Наименование: {record.name}")
     if record.inn:
@@ -72,7 +73,7 @@ def format_assessment(assessment: Assessment) -> str:
         for marker in record.inaccuracy_markers[:3]:
             lines.append(f"• {marker}")
     elif record.inaccuracy_state is InaccuracyState.ABSENT:
-        lines.extend(["", "Результат: в полученном ответе ФНС указано отсутствие недостоверных сведений."])
+        lines.extend(["", "Результат: в полученном ответе источника указано отсутствие недостоверных сведений."])
     else:
         lines.extend(["", "Результат: явная отметка о наличии или отсутствии недостоверности в полученном ответе не распознана."])
 
