@@ -161,6 +161,26 @@ class HistoryStore:
             rows = self._connection.execute(sql, params).fetchall()
         return [self._row_to_entry(row) for row in rows]
 
+    def latest_for_query(
+        self,
+        *,
+        chat_id: int | str,
+        actor_id: int | str,
+        is_root: bool,
+        query_text: str,
+    ) -> HistoryEntry | None:
+        """Возвращает последний подтверждённый результат в разрешённой области."""
+
+        sql = "SELECT * FROM check_history WHERE chat_id = ? AND query_text = ?"
+        params: list[str] = [str(chat_id), query_text]
+        if not is_root:
+            sql += " AND actor_hash = ?"
+            params.append(_digest(str(actor_id), self.hash_salt))
+        sql += " ORDER BY created_at DESC LIMIT 1"
+        with self._lock:
+            row = self._connection.execute(sql, params).fetchone()
+        return self._row_to_entry(row) if row else None
+
     def list_unique_queries(
         self,
         *,
