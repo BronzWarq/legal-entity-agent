@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from legal_entity_agent.fns_client import (
+    FnsCaptchaError,
     FnsEgrulClient,
     FnsError,
     FnsFallbackClient,
@@ -46,6 +47,15 @@ async def test_lookup_rejects_unsupported_response() -> None:
         return httpx.Response(200, text="неподдерживаемый ответ")
 
     with pytest.raises(FnsError, match="JSON"):
+        await _client(handler).lookup("7707083893")
+
+
+@pytest.mark.asyncio
+async def test_lookup_reports_captcha_without_false_result() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>captcha required</html>")
+
+    with pytest.raises(FnsCaptchaError, match="CAPTCHA"):
         await _client(handler).lookup("7707083893")
 
 
